@@ -57,6 +57,7 @@ namespace RobloxCSharp.Extensions.Entitas
 
 			INamedTypeSymbol componentInterface = compilation.GetTypeByMetadataName("Entitas.IComponent");
 			INamedTypeSymbol contextAttribute = compilation.GetTypeByMetadataName("Entitas.CodeGeneration.Attributes.ContextAttribute");
+			INamedTypeSymbol replicatedAttribute = compilation.GetTypeByMetadataName("Entitas.CodeGeneration.Attributes.ReplicatedAttribute");
 			if (componentInterface is null || contextAttribute is null) return;
 
 			Dictionary<string, ContextModel> byContext = new(StringComparer.Ordinal);
@@ -74,6 +75,9 @@ namespace RobloxCSharp.Extensions.Entitas
 					if (typeSymbol.IsAbstract) continue;
 					if (!ImplementsInterface(typeSymbol, componentInterface)) continue;
 
+					bool isReplicated = replicatedAttribute is not null
+						&& typeSymbol.GetAttributes().Any(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, replicatedAttribute));
+
 					foreach (AttributeData attr in typeSymbol.GetAttributes())
 					{
 						if (!InheritsFrom(attr.AttributeClass, contextAttribute)) continue;
@@ -85,7 +89,7 @@ namespace RobloxCSharp.Extensions.Entitas
 							ctx = new ContextModel(contextName);
 							byContext[contextName] = ctx;
 						}
-						ctx.Components.Add(new ComponentModel(typeSymbol));
+						ctx.Components.Add(new ComponentModel(typeSymbol, isReplicated));
 					}
 				}
 			}
@@ -117,6 +121,22 @@ namespace RobloxCSharp.Extensions.Entitas
 					string fileName = $"{ctx.Name}.{c.TypeName}.cs";
 					WriteFile(componentsDir, fileName, ComponentTemplate.Emit(ctx, c));
 					expectedComponentFiles.Add(fileName);
+				}
+
+				// Replication wire — one static class per context carrying
+				// [NetworkEvent(Scope.ServerToClient)] delegate fields for
+				// every [Replicated] component's Add/Replace/Remove. Only
+				// emitted when the context has at least one replicated
+				// component; otherwise the file would be empty.
+				List<ComponentModel> replicated = ctx.Components.Where(c => c.IsReplicated).ToList();
+				string replicationFile = Path.Combine(genDir, $"{ctx.Name}Replication.cs");
+				if (replicated.Count > 0)
+				{
+					WriteFile(genDir, $"{ctx.Name}Replication.cs", ReplicationTemplate.Emit(ctx, replicated));
+				}
+				else if (File.Exists(replicationFile))
+				{
+					File.Delete(replicationFile);
 				}
 			}
 
@@ -246,10 +266,12 @@ namespace RobloxCSharp.Extensions.Entitas
 		public string FullName { get; }
 		public List<ComponentField> Fields { get; }
 		public bool IsFlag => Fields.Count == 0;
+		public bool IsReplicated { get; }
 
-		public ComponentModel(INamedTypeSymbol symbol)
+		public ComponentModel(INamedTypeSymbol symbol, bool isReplicated = false)
 		{
 			Symbol = symbol;
+			IsReplicated = isReplicated;
 			FullName = symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 			Fields = new List<ComponentField>();
 			foreach (ISymbol member in symbol.GetMembers())
@@ -339,11 +361,19 @@ namespace RobloxCSharp.Extensions.Entitas
 			return sb.ToString();
 		}
 
-		internal static void EmitFlag(StringBuilder sb, ComponentModel c, string lookup)
+		internal static void EmitFlag(StringBuilder sb, ContextModel ctx, ComponentModel c, string lookup)
 		{
 			// Flag → `entity.Is{Name}` (PascalCase, gettable+settable bool).
 			// Setter swaps the shared singleton instance in/out so we don't
-			// allocate per flip.
+			// allocate per flip. Replicated flags fire the per-context
+			// Replication wire on every flip.
+			string fireAdd = c.IsReplicated
+				? $" {ctx.Name}Replication.{c.TypeName}Added?.Invoke(creationIndex, 0);"
+				: "";
+			string fireRemove = c.IsReplicated
+				? $" {ctx.Name}Replication.{c.TypeName}Removed?.Invoke(creationIndex, 0);"
+				: "";
+
 			sb.AppendLine($"\tstatic readonly {c.FullName} _{c.TypeName}Component = new();");
 			sb.AppendLine($"\tpublic bool Is{c.TypeName}");
 			sb.AppendLine("\t{");
@@ -352,14 +382,14 @@ namespace RobloxCSharp.Extensions.Entitas
 			sb.AppendLine("\t\t{");
 			sb.AppendLine($"\t\t\tif (value != Is{c.TypeName})");
 			sb.AppendLine("\t\t\t{");
-			sb.AppendLine($"\t\t\t\tif (value) AddComponent({lookup}, _{c.TypeName}Component);");
-			sb.AppendLine($"\t\t\t\telse RemoveComponent({lookup});");
+			sb.AppendLine($"\t\t\t\tif (value) {{ AddComponent({lookup}, _{c.TypeName}Component);{fireAdd} }}");
+			sb.AppendLine($"\t\t\t\telse {{ RemoveComponent({lookup});{fireRemove} }}");
 			sb.AppendLine("\t\t\t}");
 			sb.AppendLine("\t\t}");
 			sb.AppendLine("\t}");
 		}
 
-		internal static void EmitValue(StringBuilder sb, ComponentModel c, string lookup)
+		internal static void EmitValue(StringBuilder sb, ContextModel ctx, ComponentModel c, string lookup)
 		{
 			string ctorArgs = string.Join(", ", c.Fields.Select(f => $"{f.TypeFullName} new{f.Name}"));
 			string fieldAssigns = string.Join(" ", c.Fields.Select(f => $"component.{f.Name} = new{f.Name};"));
@@ -370,11 +400,29 @@ namespace RobloxCSharp.Extensions.Entitas
 			// return the component instance so `entity.Position.X` works.
 			bool unwrap = c.Fields.Count == 1 && c.Fields[0].Name == "Value";
 
+			// Replication fire-call args — entityId + field values (named
+			// new{Field}) + placeholder serverTick (0 for alpha).
+			string fireArgs = "creationIndex";
+			foreach (ComponentField f in c.Fields) fireArgs += ", new" + f.Name;
+			fireArgs += ", 0";
+			string fireAdd = c.IsReplicated
+				? $"\t\t{ctx.Name}Replication.{c.TypeName}Added?.Invoke({fireArgs});"
+				: "";
+			string fireReplace = c.IsReplicated
+				? $"\t\t{ctx.Name}Replication.{c.TypeName}Replaced?.Invoke({fireArgs});"
+				: "";
+			string fireRemove = c.IsReplicated
+				? $"\t\t{ctx.Name}Replication.{c.TypeName}Removed?.Invoke(creationIndex, 0);"
+				: "";
+
 			if (unwrap)
 			{
 				// Setter routes through CreateComponent<T> so the new
 				// instance comes off the pool when one's available.
 				string valueType = c.Fields[0].TypeFullName;
+				string fireSetter = c.IsReplicated
+					? $"\t\t\t{ctx.Name}Replication.{c.TypeName}Replaced?.Invoke(creationIndex, value, 0);"
+					: "";
 				sb.AppendLine($"\tpublic {valueType} {c.TypeName}");
 				sb.AppendLine("\t{");
 				sb.AppendLine($"\t\tget {{ return (({c.FullName})GetComponent({lookup})).Value; }}");
@@ -383,6 +431,7 @@ namespace RobloxCSharp.Extensions.Entitas
 				sb.AppendLine($"\t\t\t{c.FullName} component = CreateComponent<{c.FullName}>({lookup});");
 				sb.AppendLine($"\t\t\tcomponent.Value = value;");
 				sb.AppendLine($"\t\t\tReplaceComponent({lookup}, component);");
+				if (c.IsReplicated) sb.AppendLine(fireSetter);
 				sb.AppendLine("\t\t}");
 				sb.AppendLine("\t}");
 			}
@@ -402,6 +451,7 @@ namespace RobloxCSharp.Extensions.Entitas
 			sb.AppendLine($"\t\t{c.FullName} component = CreateComponent<{c.FullName}>({lookup});");
 			sb.AppendLine($"\t\t{fieldAssigns}");
 			sb.AppendLine($"\t\tAddComponent({lookup}, component);");
+			if (c.IsReplicated) sb.AppendLine(fireAdd);
 			sb.AppendLine("\t\treturn component;");
 			sb.AppendLine("\t}");
 
@@ -411,6 +461,7 @@ namespace RobloxCSharp.Extensions.Entitas
 			sb.AppendLine($"\t\t{c.FullName} component = CreateComponent<{c.FullName}>({lookup});");
 			sb.AppendLine($"\t\t{fieldAssigns}");
 			sb.AppendLine($"\t\tReplaceComponent({lookup}, component);");
+			if (c.IsReplicated) sb.AppendLine(fireReplace);
 			sb.AppendLine("\t\treturn component;");
 			sb.AppendLine("\t}");
 
@@ -418,6 +469,7 @@ namespace RobloxCSharp.Extensions.Entitas
 			sb.AppendLine($"\tpublic void Remove{c.TypeName}()");
 			sb.AppendLine("\t{");
 			sb.AppendLine($"\t\tRemoveComponent({lookup});");
+			if (c.IsReplicated) sb.AppendLine(fireRemove);
 			sb.AppendLine("\t}");
 		}
 	}
@@ -465,6 +517,57 @@ namespace RobloxCSharp.Extensions.Entitas
 		}
 	}
 
+	// Per-context replication wire — one static class per context with
+	// `[NetworkEvent(Scope.ServerToClient)]`-tagged delegate fields for
+	// every [Replicated] component's Add / Replace / Remove. The
+	// roblox-csharp-networking plugin rewrites `?.Invoke(...)` to
+	// `RemoteEvent:FireAllClients(...)` and `+= handler` to
+	// `RemoteEvent:OnClientEvent:Connect(handler)`.
+	//
+	// Signatures:
+	//   Added/Replaced for value components: Action<int entityId, ...fields, ushort serverTick>
+	//   Added for flag components:           Action<int entityId, ushort serverTick>
+	//   Removed (every replicated component): Action<int entityId, ushort serverTick>
+	//
+	// serverTick is a placeholder for the alpha (always 0) — kept in the
+	// signature now so client-prediction work later doesn't have to break
+	// the wire shape.
+	internal static class ReplicationTemplate
+	{
+		public static string Emit(ContextModel ctx, List<ComponentModel> replicated)
+		{
+			StringBuilder sb = new();
+			sb.AppendLine("// <auto-generated/> roblox-csharp-entitas");
+			sb.AppendLine("using System;");
+			sb.AppendLine("using Networking;");
+			sb.AppendLine();
+			sb.AppendLine($"public static class {ctx.Name}Replication");
+			sb.AppendLine("{");
+			foreach (ComponentModel c in replicated)
+			{
+				string addedSig = BuildAddedSignature(c);
+				sb.AppendLine($"\t[NetworkEvent(Scope.ServerToClient)] public static Action<{addedSig}> {c.TypeName}Added;");
+				if (!c.IsFlag)
+				{
+					sb.AppendLine($"\t[NetworkEvent(Scope.ServerToClient)] public static Action<{addedSig}> {c.TypeName}Replaced;");
+				}
+				sb.AppendLine($"\t[NetworkEvent(Scope.ServerToClient)] public static Action<int, ushort> {c.TypeName}Removed;");
+				sb.AppendLine();
+			}
+			sb.AppendLine("}");
+			return sb.ToString();
+		}
+
+		// entityId + each field's CLR type + serverTick.
+		private static string BuildAddedSignature(ComponentModel c)
+		{
+			List<string> parts = new() { "int" }; // entityId
+			foreach (ComponentField f in c.Fields) parts.Add(f.TypeFullName);
+			parts.Add("ushort"); // serverTick (placeholder)
+			return string.Join(", ", parts);
+		}
+	}
+
 	// One file per (context, component) pair — the navigable unit of the
 	// codegen. Holds the entity property/methods + the matcher static
 	// getter for that single component, both as `partial class` members.
@@ -481,8 +584,8 @@ namespace RobloxCSharp.Extensions.Entitas
 			sb.AppendLine($"public sealed partial class {ctx.Name}Entity");
 			sb.AppendLine("{");
 			string lookup = $"{ctx.Name}ComponentsLookup.{c.TypeName}";
-			if (c.IsFlag) EntityTemplate.EmitFlag(sb, c, lookup);
-			else EntityTemplate.EmitValue(sb, c, lookup);
+			if (c.IsFlag) EntityTemplate.EmitFlag(sb, ctx, c, lookup);
+			else EntityTemplate.EmitValue(sb, ctx, c, lookup);
 			sb.AppendLine("}");
 
 			sb.AppendLine();

@@ -494,5 +494,118 @@ namespace Ents {
 			Assert.Contains("set", entity);
 			Assert.Contains("CreateComponent<global::G.Health>", entity);
 		}
+
+		// ----------------------------------------------------------------
+		// Replication codegen — [Replicated] components emit per-context
+		// Replication.cs with [NetworkEvent(Scope.ServerToClient)] delegate
+		// fields, and the entity's Add/Replace/Remove bodies fire them.
+		// ----------------------------------------------------------------
+
+		private const string OneReplicatedHealth = @"
+using Entitas;
+using Entitas.CodeGeneration.Attributes;
+namespace G {
+	[Game, Replicated] public class Health : IComponent { public int Value; }
+}";
+
+		private const string OneReplicatedFlag = @"
+using Entitas;
+using Entitas.CodeGeneration.Attributes;
+namespace G {
+	[Game, Replicated] public class Stunned : IComponent { }
+}";
+
+		[Fact]
+		public void Replication_EmitsContextReplicationFile_WhenComponentIsReplicated()
+		{
+			TestHarness.Project p = Run(nameof(Replication_EmitsContextReplicationFile_WhenComponentIsReplicated), OneReplicatedHealth);
+			Assert.True(TestHarness.GeneratedExists(p, "GameReplication.cs"));
+		}
+
+		[Fact]
+		public void Replication_DoesNotEmitFile_WhenNoComponentIsReplicated()
+		{
+			TestHarness.Project p = Run(nameof(Replication_DoesNotEmitFile_WhenNoComponentIsReplicated), OneGameHealth);
+			Assert.False(TestHarness.GeneratedExists(p, "GameReplication.cs"));
+		}
+
+		[Fact]
+		public void Replication_ValueComponent_EmitsAddReplacedRemovedAsNetworkEvents()
+		{
+			TestHarness.Project p = Run(nameof(Replication_ValueComponent_EmitsAddReplacedRemovedAsNetworkEvents), OneReplicatedHealth);
+			string repl = TestHarness.ReadGenerated(p, "GameReplication.cs");
+
+			Assert.Contains("using Networking;", repl);
+			Assert.Contains("public static class GameReplication", repl);
+			Assert.Contains("[NetworkEvent(Scope.ServerToClient)] public static Action<int, int, ushort> HealthAdded;", repl);
+			Assert.Contains("[NetworkEvent(Scope.ServerToClient)] public static Action<int, int, ushort> HealthReplaced;", repl);
+			Assert.Contains("[NetworkEvent(Scope.ServerToClient)] public static Action<int, ushort> HealthRemoved;", repl);
+		}
+
+		[Fact]
+		public void Replication_FlagComponent_EmitsAddedRemovedButNotReplaced()
+		{
+			// Flags are binary — Add fires when toggled true, Remove fires
+			// when toggled false. There's no Replaced (the singleton
+			// instance never changes).
+			TestHarness.Project p = Run(nameof(Replication_FlagComponent_EmitsAddedRemovedButNotReplaced), OneReplicatedFlag);
+			string repl = TestHarness.ReadGenerated(p, "GameReplication.cs");
+
+			Assert.Contains("public static Action<int, ushort> StunnedAdded;", repl);
+			Assert.Contains("public static Action<int, ushort> StunnedRemoved;", repl);
+			Assert.DoesNotContain("StunnedReplaced", repl);
+		}
+
+		[Fact]
+		public void Replication_ValueAddX_BodyFiresAddedEvent()
+		{
+			TestHarness.Project p = Run(nameof(Replication_ValueAddX_BodyFiresAddedEvent), OneReplicatedHealth);
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			Assert.Contains("GameReplication.HealthAdded?.Invoke(creationIndex, newValue, 0);", entity);
+		}
+
+		[Fact]
+		public void Replication_ValueReplaceX_BodyFiresReplacedEvent()
+		{
+			TestHarness.Project p = Run(nameof(Replication_ValueReplaceX_BodyFiresReplacedEvent), OneReplicatedHealth);
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			Assert.Contains("GameReplication.HealthReplaced?.Invoke(creationIndex, newValue, 0);", entity);
+		}
+
+		[Fact]
+		public void Replication_ValueSetter_FiresReplacedEvent()
+		{
+			TestHarness.Project p = Run(nameof(Replication_ValueSetter_FiresReplacedEvent), OneReplicatedHealth);
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			Assert.Contains("GameReplication.HealthReplaced?.Invoke(creationIndex, value, 0);", entity);
+		}
+
+		[Fact]
+		public void Replication_RemoveX_BodyFiresRemovedEvent()
+		{
+			TestHarness.Project p = Run(nameof(Replication_RemoveX_BodyFiresRemovedEvent), OneReplicatedHealth);
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			Assert.Contains("GameReplication.HealthRemoved?.Invoke(creationIndex, 0);", entity);
+		}
+
+		[Fact]
+		public void Replication_FlagSetter_FiresAddedOrRemovedDependingOnValue()
+		{
+			TestHarness.Project p = Run(nameof(Replication_FlagSetter_FiresAddedOrRemovedDependingOnValue), OneReplicatedFlag);
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Stunned.cs");
+			Assert.Contains("GameReplication.StunnedAdded?.Invoke(creationIndex, 0);", entity);
+			Assert.Contains("GameReplication.StunnedRemoved?.Invoke(creationIndex, 0);", entity);
+		}
+
+		[Fact]
+		public void NonReplicated_AddX_DoesNotFireAnyEvent()
+		{
+			// Regression: only [Replicated] components get the fire-call
+			// injection. Plain components stay untouched.
+			TestHarness.Project p = Run(nameof(NonReplicated_AddX_DoesNotFireAnyEvent), OneGameHealth);
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			Assert.DoesNotContain("Replication.", entity);
+			Assert.DoesNotContain("?.Invoke(", entity);
+		}
 	}
 }
