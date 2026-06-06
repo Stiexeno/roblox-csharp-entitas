@@ -171,7 +171,7 @@ namespace G {
 		public void EntityFlag_EmitsIsXPropertyWithGetterAndSetter()
 		{
 			TestHarness.Project p = Run(nameof(EntityFlag_EmitsIsXPropertyWithGetterAndSetter), OneGamePlayer);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Player.cs");
 			Assert.Contains("public bool IsPlayer", entity);
 			Assert.Contains("get { return HasComponent(GameComponentsLookup.Player); }", entity);
 			Assert.Contains("AddComponent(GameComponentsLookup.Player, _PlayerComponent)", entity);
@@ -182,7 +182,7 @@ namespace G {
 		public void EntityFlag_HasStaticSingletonForReuse()
 		{
 			TestHarness.Project p = Run(nameof(EntityFlag_HasStaticSingletonForReuse), OneGamePlayer);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Player.cs");
 			Assert.Contains("static readonly global::G.Player _PlayerComponent = new();", entity);
 		}
 
@@ -190,7 +190,7 @@ namespace G {
 		public void EntityValue_SingleValueField_EmitsUnwrappingGetterAndSetter()
 		{
 			TestHarness.Project p = Run(nameof(EntityValue_SingleValueField_EmitsUnwrappingGetterAndSetter), OneGameHealth);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
 
 			Assert.Contains("public int Health", entity);
 			Assert.Contains(").Value;", entity);
@@ -201,7 +201,7 @@ namespace G {
 		public void EntityValue_AlwaysEmitsHasXProperty()
 		{
 			TestHarness.Project p = Run(nameof(EntityValue_AlwaysEmitsHasXProperty), OneGameHealth);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
 			Assert.Contains("public bool HasHealth", entity);
 			Assert.Contains("HasComponent(GameComponentsLookup.Health)", entity);
 		}
@@ -210,7 +210,7 @@ namespace G {
 		public void EntityValue_AlwaysEmitsAddReplaceRemoveMethods()
 		{
 			TestHarness.Project p = Run(nameof(EntityValue_AlwaysEmitsAddReplaceRemoveMethods), OneGameHealth);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
 			Assert.Contains("AddHealth(int newValue)", entity);
 			Assert.Contains("ReplaceHealth(int newValue)", entity);
 			Assert.Contains("public void RemoveHealth()", entity);
@@ -224,7 +224,7 @@ using Entitas;
 using Entitas.CodeGeneration.Attributes;
 namespace G { [Game] public class Pos : IComponent { public int X; public int Y; } }";
 			TestHarness.Project p = Run(nameof(EntityValue_MultiField_DoesNotUnwrap), source);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Pos.cs");
 
 			// Multi-field — the property returns the component instance,
 			// not an unwrapped value. Setter is intentionally absent (the
@@ -245,7 +245,7 @@ using Entitas;
 using Entitas.CodeGeneration.Attributes;
 namespace G { [Game] public class AttackEvent : IComponent { public int AttackerId; } }";
 			TestHarness.Project p = Run(nameof(EntityValue_SingleNonValueField_DoesNotUnwrap), source);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.AttackEvent.cs");
 
 			// Field is named AttackerId, not Value — unwrap rule must not
 			// fire. Property returns the component instance.
@@ -267,7 +267,7 @@ namespace G {
 	[Game] public class Position : IComponent { public Custom.Vec3 Value; }
 }";
 			TestHarness.Project p = Run(nameof(EntityValue_PreservesFullyQualifiedFieldType), source);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Position.cs");
 			Assert.Contains("public global::Custom.Vec3 Position", entity);
 		}
 
@@ -278,7 +278,7 @@ namespace G {
 			// matching AddPlayer / ReplacePlayer signature, just the
 			// IsPlayer property + the singleton.
 			TestHarness.Project p = Run(nameof(EntityFlag_DoesNotEmitAddXMethod), OneGamePlayer);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Player.cs");
 			Assert.DoesNotContain("AddPlayer(", entity);
 			Assert.DoesNotContain("ReplacePlayer(", entity);
 		}
@@ -299,7 +299,7 @@ namespace G {
 		public void Matcher_EmitsPerComponentStaticGetter()
 		{
 			TestHarness.Project p = Run(nameof(Matcher_EmitsPerComponentStaticGetter), OneGamePlayer);
-			string matcher = TestHarness.ReadGenerated(p, "GameMatcher.cs");
+			string matcher = TestHarness.ReadGenerated(p, "Components/Game.Player.cs");
 			Assert.Contains("public static IMatcher<GameEntity> Player", matcher);
 			Assert.Contains("Matcher.AllOfIndices<GameEntity>(GameComponentsLookup.Player)", matcher);
 		}
@@ -308,7 +308,7 @@ namespace G {
 		public void Matcher_CachesPerComponentInstance()
 		{
 			TestHarness.Project p = Run(nameof(Matcher_CachesPerComponentInstance), OneGamePlayer);
-			string matcher = TestHarness.ReadGenerated(p, "GameMatcher.cs");
+			string matcher = TestHarness.ReadGenerated(p, "Components/Game.Player.cs");
 			Assert.Contains("static IMatcher<GameEntity> _matcherPlayer;", matcher);
 			Assert.Contains("if (_matcherPlayer == null)", matcher);
 		}
@@ -328,7 +328,7 @@ namespace G {
 			// Jenny's matcher carries componentNames so its ToString /
 			// debug shows the human-readable name. Replicate verbatim.
 			TestHarness.Project p = Run(nameof(Matcher_AssignsComponentNamesForDebug), OneGamePlayer);
-			string matcher = TestHarness.ReadGenerated(p, "GameMatcher.cs");
+			string matcher = TestHarness.ReadGenerated(p, "Components/Game.Player.cs");
 			Assert.Contains("m.componentNames = GameComponentsLookup.componentNames", matcher);
 		}
 
@@ -466,7 +466,7 @@ namespace Ents {
 		public void EntityValue_AddX_BodyRoutesThroughCreateComponent()
 		{
 			TestHarness.Project p = Run(nameof(EntityValue_AddX_BodyRoutesThroughCreateComponent), OneGameHealth);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
 			Assert.Contains("CreateComponent<global::G.Health>(GameComponentsLookup.Health)", entity);
 			Assert.DoesNotContain("global::G.Health component = new();", entity);
 		}
@@ -475,7 +475,7 @@ namespace Ents {
 		public void EntityValue_ReplaceX_BodyRoutesThroughCreateComponent()
 		{
 			TestHarness.Project p = Run(nameof(EntityValue_ReplaceX_BodyRoutesThroughCreateComponent), OneGameHealth);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
 			// Both Add and Replace lines should match; count to verify both.
 			int hits = System.Text.RegularExpressions.Regex.Matches(
 				entity, @"CreateComponent<global::G\.Health>\(GameComponentsLookup\.Health\)").Count;
@@ -489,7 +489,7 @@ namespace Ents {
 			// pool recycling applies even when users prefer the property
 			// syntax over ReplaceHealth(...).
 			TestHarness.Project p = Run(nameof(EntityValue_SetterRoutesThroughCreateComponent), OneGameHealth);
-			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
 			// Find the setter block and verify it calls CreateComponent.
 			Assert.Contains("set", entity);
 			Assert.Contains("CreateComponent<global::G.Health>", entity);
