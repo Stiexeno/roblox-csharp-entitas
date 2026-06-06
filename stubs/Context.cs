@@ -10,6 +10,7 @@ namespace Entitas
 	{
 		public extern int totalComponents { get; }
 		public extern int count { get; }
+		public extern int reusableEntitiesCount { get; }
 
 		public extern Context(int totalComponents);
 

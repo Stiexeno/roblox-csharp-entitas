@@ -603,6 +603,62 @@ using Entitas.CodeGeneration.Attributes;
 			string user = GetUser(outputs);
 			Assert.Contains("ctx:Initialize(e)", user);
 		}
+
+		// ----------------------------------------------------------------
+		// Entity pool — Destroy recycles into Context._reusableEntities,
+		// next CreateEntity pops + Reactivates instead of allocating fresh.
+		// Tests at this level only assert the API surface lowers — runtime
+		// behaviour is verified by reading the hand-written Luau directly.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void Entity_Reactivate_CanBeCalledThroughIEntityInterface()
+		{
+			Dictionary<string, string> outputs = Run(
+				nameof(Entity_Reactivate_CanBeCalledThroughIEntityInterface),
+				@"namespace U {
+					public class Setup {
+						public void Wire(IEntity e) { e.Reactivate(7); }
+					}
+				}");
+
+			string user = GetUser(outputs);
+			Assert.Contains("e:Reactivate(7)", user);
+		}
+
+		[Fact]
+		public void Context_ReusableEntitiesCount_AccessibleThroughIContextInterface()
+		{
+			Dictionary<string, string> outputs = Run(
+				nameof(Context_ReusableEntitiesCount_AccessibleThroughIContextInterface),
+				@"namespace U {
+					public class Telemetry {
+						public int Pooled(IContext ctx) { return ctx.reusableEntitiesCount; }
+					}
+				}");
+
+			string user = GetUser(outputs);
+			// Property access on instance lowers to a getter-method call.
+			Assert.Contains("ctx:reusableEntitiesCount()", user);
+		}
+
+		[Fact]
+		public void Entity_Destroy_LowersToColonMethodCall()
+		{
+			Dictionary<string, string> outputs = Run(
+				nameof(Entity_Destroy_LowersToColonMethodCall),
+				@"namespace U {
+					[Game] public class Player : IComponent { }
+					public class Setup {
+						public void Kill(GameEntity e) { e.Destroy(); }
+					}
+				}");
+
+			string user = GetUser(outputs);
+			// In Lua, Destroy fires the back-channel to Context for the
+			// reuse-stack push. The lowering itself is just the method call.
+			Assert.Contains("e:Destroy()", user);
+		}
 	}
 }
 

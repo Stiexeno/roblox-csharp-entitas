@@ -1,9 +1,8 @@
 namespace Entitas
 {
-	// Public Entitas-1.14 surface. The alpha runtime drops AERC retain /
-	// release, event delegates, and component pools — frozen-feast-style
-	// code doesn't reach for them. The TODOs in Entity.cs flag where the
-	// production runtime needs to grow back.
+	// Public Entitas-1.14 surface. Alpha runtime drops AERC retain /
+	// release and event delegates; component pools land in a separate
+	// commit. Entity pool is wired here.
 	public interface IEntity
 	{
 		int totalComponents { get; }
@@ -13,6 +12,11 @@ namespace Entitas
 		// Wires a fresh entity for use — called by Context.CreateEntity
 		// right after the concrete instance is constructed.
 		void Initialize(int creationIndex, int totalComponents);
+
+		// Re-wires a recycled entity pulled off Context._reusableEntities.
+		// Distinct from Initialize so totalComponents / pool refs don't
+		// have to be re-set; only the creationIndex changes per generation.
+		void Reactivate(int creationIndex);
 
 		void AddComponent(int index, IComponent component);
 		void RemoveComponent(int index);

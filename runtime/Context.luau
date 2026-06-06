@@ -1,6 +1,7 @@
 -- Entitas Context (alpha port). Parent of generated GameContext / InputContext.
--- Holds the set of live entities, tracks creationIndex, lazily creates groups,
--- broadcasts entity-component changes to interested groups.
+-- Holds the active entity set, tracks creationIndex, lazily creates groups,
+-- broadcasts entity-component changes to interested groups, and maintains
+-- a reuse stack so destroyed entities recycle instead of churning the GC.
 
 local Group = require(script.Parent.Group)
 
@@ -16,6 +17,7 @@ function Context:constructor(totalComponents)
 	self.totalComponents = totalComponents or 0
 	self._entities = {}             -- set: [entity] = true
 	self._count = 0
+	self._reusableEntities = {}     -- stack-as-array; destroyed entities live here
 	self._groups = {}               -- IMatcher → Group (keyed by table identity)
 	self._creationIndex = 0
 	self._entitiesCache = nil
@@ -29,31 +31,51 @@ function Context:CreateEntityInstance()
 end
 
 function Context:get_count() return self._count end
+function Context:get_reusableEntitiesCount() return #self._reusableEntities end
 
 function Context:CreateEntity()
-	-- CreateEntityInstance is overridden on the codegen-emitted subclass
-	-- (GameContext, InputContext, ...) so we get a concrete typed entity.
+	-- Reuse path: pop a destroyed husk off the stack and Reactivate.
+	-- Avoids the allocator and skips the codegen-emitted CreateEntityInstance.
+	if #self._reusableEntities > 0 then
+		local entity = table.remove(self._reusableEntities)
+		entity:Reactivate(self._creationIndex)
+		self._creationIndex = self._creationIndex + 1
+		self._entities[entity] = true
+		self._count = self._count + 1
+		self._entitiesCache = nil
+		return entity
+	end
+
+	-- Fresh path: codegen-emitted subclass produces a typed entity.
 	local entity = self:CreateEntityInstance()
 	if entity == nil then
 		error("CreateEntity() got nil — did the codegen emit CreateEntityInstance() on the partial context?")
 	end
 	self:Initialize(entity)
-	-- Newly created entities have no components yet, so no group will
-	-- match — defer membership computation until the first Add fires
-	-- NotifyComponentChanged.
 	return entity
 end
 
--- Mirror of the C# stub's Context.Initialize(TEntity) helper. Wires a
--- pre-constructed entity into this context — useful when tests / custom
--- code skip the CreateEntity path. CreateEntity calls through here so
--- both routes share the same bookkeeping.
+-- Wires a pre-constructed entity into this context. Used by CreateEntity's
+-- fresh path and by tests / framework code that wants to attach its own
+-- entity instances. Sets the _context back-reference so Destroy can push
+-- the entity onto _reusableEntities later.
 function Context:Initialize(entity)
+	entity._context = self
 	entity:Initialize(self._creationIndex, self.totalComponents)
 	self._creationIndex = self._creationIndex + 1
 	self._entities[entity] = true
 	self._count = self._count + 1
 	self._entitiesCache = nil
+end
+
+-- Internal callback Entity:Destroy fires. Pulls the entity out of the
+-- active set and onto the reuse stack.
+function Context:_OnEntityDestroyed(entity)
+	if not self._entities[entity] then return end
+	self._entities[entity] = nil
+	self._count = self._count - 1
+	self._entitiesCache = nil
+	table.insert(self._reusableEntities, entity)
 end
 
 function Context:HasEntity(entity) return self._entities[entity] == true end
@@ -82,12 +104,15 @@ function Context:GetGroup(matcher)
 end
 
 function Context:DestroyAllEntities()
+	-- Snapshot before iterating: Destroy mutates _entities through the
+	-- back-channel and Lua doesn't promise iteration stability across mutation.
+	local toDestroy = {}
 	for e, _ in pairs(self._entities) do
-		e:Destroy()
+		table.insert(toDestroy, e)
 	end
-	self._entities = {}
-	self._count = 0
-	self._entitiesCache = nil
+	for i = 1, #toDestroy do
+		toDestroy[i]:Destroy()
+	end
 end
 
 function Context:ResetCreationIndex() self._creationIndex = 0 end

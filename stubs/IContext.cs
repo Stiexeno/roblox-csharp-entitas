@@ -8,6 +8,11 @@ namespace Entitas
 
 		int count { get; }
 
+		// How many entities are sitting on the reuse stack, ready to be
+		// recycled by the next CreateEntity. Bumped on Destroy, drained
+		// on CreateEntity. Useful for tuning + telemetry.
+		int reusableEntitiesCount { get; }
+
 		void DestroyAllEntities();
 
 		void ResetCreationIndex();

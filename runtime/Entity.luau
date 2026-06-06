@@ -2,8 +2,9 @@
 -- Holds components in an integer-keyed table; the codegen-emitted entity
 -- extensions go through AddComponent / HasComponent / etc.
 --
--- Simplified vs Entitas 1.14: no AERC, no component pools, no event delegates.
--- See stubs/Entity.cs for the matching C# surface.
+-- _context back-reference is set by Context:Initialize so Destroy can push
+-- this entity onto the context's reuse stack. Without that link, recycled
+-- entities would just be GC'd.
 
 local Entity = {}
 Entity.__index = Entity
@@ -15,6 +16,7 @@ end
 
 function Entity:constructor()
 	self._components = {}
+	self._context = nil
 	self.totalComponents = 0
 	self.creationIndex = 0
 	self.isEnabled = false
@@ -105,6 +107,12 @@ end
 function Entity:Destroy()
 	self:RemoveAllComponents()
 	self.isEnabled = false
+	-- Hand the husk back to the context for reuse. The context
+	-- removes us from its active set and pushes us onto its
+	-- _reusableEntities stack; the next CreateEntity pops + Reactivates.
+	if self._context ~= nil then
+		self._context:_OnEntityDestroyed(self)
+	end
 end
 
 return Entity
