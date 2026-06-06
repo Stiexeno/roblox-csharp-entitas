@@ -1,116 +1,38 @@
-using System;
-using System.Collections.Generic;
+#pragma warning disable CS0626 // Methods are implemented in runtime/Entity.luau, not in this assembly.
 
 namespace Entitas
 {
-	// Simplified port of Entitas-1.14's Entity. The alpha runtime drops:
-	//   - AERC retain / release (Roblox is GC'd; no manual lifetime mgmt)
-	//   - Event delegates (OnComponentAdded, …)
-	//   - Component pools (Lua tables churn cheaply enough for now)
-	//   - ContextInfo / componentNames lookups
-	// Generated GameEntity / InputEntity / … inherit from this and the
-	// codegen adds typed extension methods (isPlayer, AddHealth, …) over
-	// the dictionary-backed AddComponent / HasComponent / etc.
+	// IDE type-checking surface only. Every member is `extern` to make the
+	// "implemented elsewhere" intent explicit — the actual code lives in
+	// runtime/Entity.luau, and the transpiler routes references to this
+	// class through that module by filename (stubs ↔ runtime convention).
 	//
-	// TODO: re-introduce component pools + event delegates when the
-	// runtime is hardened; frozen-feast doesn't lean on them but they're
-	// part of the documented Entitas contract.
+	// Generated {Ctx}Entity partials inherit from this. The codegen's
+	// per-component property + method emit calls into AddComponent /
+	// HasComponent / etc., which match the names the Luau runtime exposes,
+	// so dispatch lines up at runtime even though nothing here executes.
 	public class Entity : IEntity
 	{
-		private readonly Dictionary<int, IComponent> _components = new();
+		public extern int totalComponents { get; }
+		public extern int creationIndex { get; }
+		public extern bool isEnabled { get; }
 
-		public int totalComponents { get; private set; }
-		public int creationIndex { get; private set; }
-		public bool isEnabled { get; private set; }
+		public extern void Initialize(int creationIndex, int totalComponents);
+		public extern void Reactivate(int creationIndex);
 
-		public void Initialize(int creationIndex, int totalComponents)
-		{
-			this.creationIndex = creationIndex;
-			this.totalComponents = totalComponents;
-			isEnabled = true;
-		}
+		public extern void AddComponent(int index, IComponent component);
+		public extern void RemoveComponent(int index);
+		public extern void ReplaceComponent(int index, IComponent component);
 
-		public void Reactivate(int creationIndex)
-		{
-			this.creationIndex = creationIndex;
-			isEnabled = true;
-		}
+		public extern IComponent GetComponent(int index);
+		public extern IComponent[] GetComponents();
+		public extern int[] GetComponentIndices();
 
-		public void AddComponent(int index, IComponent component)
-		{
-			if (!isEnabled) throw new InvalidOperationException("Cannot add component to a destroyed entity.");
-			if (_components.ContainsKey(index))
-				throw new InvalidOperationException($"Entity already has component at index {index}.");
-			_components[index] = component;
-		}
+		public extern bool HasComponent(int index);
+		public extern bool HasComponents(int[] indices);
+		public extern bool HasAnyComponent(int[] indices);
 
-		public void RemoveComponent(int index)
-		{
-			if (!isEnabled) throw new InvalidOperationException("Cannot remove component from a destroyed entity.");
-			if (!_components.ContainsKey(index))
-				throw new InvalidOperationException($"Entity does not have component at index {index}.");
-			_components.Remove(index);
-		}
-
-		public void ReplaceComponent(int index, IComponent component)
-		{
-			if (!isEnabled) throw new InvalidOperationException("Cannot replace component on a destroyed entity.");
-			if (component is null)
-			{
-				if (_components.ContainsKey(index)) _components.Remove(index);
-				return;
-			}
-			_components[index] = component;
-		}
-
-		public IComponent GetComponent(int index)
-		{
-			if (!_components.TryGetValue(index, out IComponent component))
-				throw new InvalidOperationException($"Entity does not have component at index {index}.");
-			return component;
-		}
-
-		public IComponent[] GetComponents()
-		{
-			IComponent[] result = new IComponent[_components.Count];
-			int i = 0;
-			foreach (KeyValuePair<int, IComponent> kvp in _components) result[i++] = kvp.Value;
-			return result;
-		}
-
-		public int[] GetComponentIndices()
-		{
-			int[] result = new int[_components.Count];
-			int i = 0;
-			foreach (KeyValuePair<int, IComponent> kvp in _components) result[i++] = kvp.Key;
-			return result;
-		}
-
-		public bool HasComponent(int index) => _components.ContainsKey(index);
-
-		public bool HasComponents(int[] indices)
-		{
-			for (int i = 0; i < indices.Length; i++)
-				if (!_components.ContainsKey(indices[i])) return false;
-			return true;
-		}
-
-		public bool HasAnyComponent(int[] indices)
-		{
-			for (int i = 0; i < indices.Length; i++)
-				if (_components.ContainsKey(indices[i])) return true;
-			return false;
-		}
-
-		public void RemoveAllComponents()
-		{
-			_components.Clear();
-		}
-
-		public void Destroy()
-		{
-			RemoveAllComponents();
-			isEnabled = false;
-		}
+		public extern void RemoveAllComponents();
+		public extern void Destroy();
 	}
 }

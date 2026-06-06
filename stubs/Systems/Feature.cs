@@ -1,18 +1,13 @@
+#pragma warning disable CS0626 // Methods are implemented in runtime/Feature.luau, not in this assembly.
+
 namespace Entitas
 {
-	// `Feature` is `Systems` with a name. Frozen-feast composes a tree of
-	// features (`new GameplayFeature(contexts).Add(new CombatFeature(...))`)
-	// to organize ECS code by domain. The named identity is only used for
-	// debugging; runtime behavior matches Systems exactly.
+	// IDE type-checking surface — runtime/Feature.luau is the real impl.
 	public class Feature : Systems
 	{
-		public string name { get; }
+		public extern string name { get; }
 
-		public Feature(string name)
-		{
-			this.name = name;
-		}
-
-		public Feature() : this("Feature") { }
+		public extern Feature(string name);
+		public extern Feature();
 	}
 }
