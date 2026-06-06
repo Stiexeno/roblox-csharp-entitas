@@ -125,19 +125,29 @@ namespace RobloxCSharp.Extensions.Entitas
 
 				// Replication wire — one static class per context carrying
 				// [NetworkEvent(Scope.ServerToClient)] delegate fields for
-				// every [Replicated] component's Add/Replace/Remove. Only
-				// emitted when the context has at least one replicated
-				// component; otherwise the file would be empty.
+				// every [Replicated] component's Add/Replace/Remove. Plus
+				// a client-side mirror that subscribes to those events and
+				// maintains the server→client entity mapping. Both files
+				// emitted as a pair; if no component is replicated, both
+				// deleted (idempotent codegen).
 				List<ComponentModel> replicated = ctx.Components.Where(c => c.IsReplicated).ToList();
 				string replicationFile = Path.Combine(genDir, $"{ctx.Name}Replication.cs");
+				string mirrorFile = Path.Combine(genDir, $"{ctx.Name}ClientMirror.cs");
+				string staleMirrorClient = Path.Combine(genDir, $"{ctx.Name}ClientMirror.client.cs");
 				if (replicated.Count > 0)
 				{
 					WriteFile(genDir, $"{ctx.Name}Replication.cs", ReplicationTemplate.Emit(ctx, replicated));
+					WriteFile(genDir, $"{ctx.Name}ClientMirror.cs", ClientMirrorTemplate.Emit(ctx, replicated));
 				}
-				else if (File.Exists(replicationFile))
+				else
 				{
-					File.Delete(replicationFile);
+					if (File.Exists(replicationFile)) File.Delete(replicationFile);
+					if (File.Exists(mirrorFile)) File.Delete(mirrorFile);
 				}
+				// Old slice wrote the mirror with .client.cs which the
+				// transpiler treats as a raw client script (only ctor body
+				// emitted, helpers stripped). Sweep that stale variant.
+				if (File.Exists(staleMirrorClient)) File.Delete(staleMirrorClient);
 			}
 
 			WriteFile(genDir, "Contexts.cs", ContextsTemplate.Emit(byContext.Values.OrderBy(c => c.Name, StringComparer.Ordinal).ToList()));
@@ -366,12 +376,13 @@ namespace RobloxCSharp.Extensions.Entitas
 			// Flag → `entity.Is{Name}` (PascalCase, gettable+settable bool).
 			// Setter swaps the shared singleton instance in/out so we don't
 			// allocate per flip. Replicated flags fire the per-context
-			// Replication wire on every flip.
+			// Replication wire on every flip, guarded by ShouldEmit so the
+			// client / suppress scopes skip the fire.
 			string fireAdd = c.IsReplicated
-				? $" {ctx.Name}Replication.{c.TypeName}Added?.Invoke(creationIndex, 0);"
+				? $" if (EntitasReplication.ShouldEmit()) {ctx.Name}Replication.{c.TypeName}Added?.Invoke(creationIndex, 0);"
 				: "";
 			string fireRemove = c.IsReplicated
-				? $" {ctx.Name}Replication.{c.TypeName}Removed?.Invoke(creationIndex, 0);"
+				? $" if (EntitasReplication.ShouldEmit()) {ctx.Name}Replication.{c.TypeName}Removed?.Invoke(creationIndex, 0);"
 				: "";
 
 			sb.AppendLine($"\tstatic readonly {c.FullName} _{c.TypeName}Component = new();");
@@ -401,18 +412,19 @@ namespace RobloxCSharp.Extensions.Entitas
 			bool unwrap = c.Fields.Count == 1 && c.Fields[0].Name == "Value";
 
 			// Replication fire-call args — entityId + field values (named
-			// new{Field}) + placeholder serverTick (0 for alpha).
+			// new{Field}) + placeholder serverTick (0 for alpha). Each fire
+			// is guarded by ShouldEmit so client / suppress-scoped calls skip.
 			string fireArgs = "creationIndex";
 			foreach (ComponentField f in c.Fields) fireArgs += ", new" + f.Name;
 			fireArgs += ", 0";
 			string fireAdd = c.IsReplicated
-				? $"\t\t{ctx.Name}Replication.{c.TypeName}Added?.Invoke({fireArgs});"
+				? $"\t\tif (EntitasReplication.ShouldEmit()) {{ {ctx.Name}Replication.{c.TypeName}Added?.Invoke({fireArgs}); }}"
 				: "";
 			string fireReplace = c.IsReplicated
-				? $"\t\t{ctx.Name}Replication.{c.TypeName}Replaced?.Invoke({fireArgs});"
+				? $"\t\tif (EntitasReplication.ShouldEmit()) {{ {ctx.Name}Replication.{c.TypeName}Replaced?.Invoke({fireArgs}); }}"
 				: "";
 			string fireRemove = c.IsReplicated
-				? $"\t\t{ctx.Name}Replication.{c.TypeName}Removed?.Invoke(creationIndex, 0);"
+				? $"\t\tif (EntitasReplication.ShouldEmit()) {{ {ctx.Name}Replication.{c.TypeName}Removed?.Invoke(creationIndex, 0); }}"
 				: "";
 
 			if (unwrap)
@@ -421,7 +433,7 @@ namespace RobloxCSharp.Extensions.Entitas
 				// instance comes off the pool when one's available.
 				string valueType = c.Fields[0].TypeFullName;
 				string fireSetter = c.IsReplicated
-					? $"\t\t\t{ctx.Name}Replication.{c.TypeName}Replaced?.Invoke(creationIndex, value, 0);"
+					? $"\t\t\tif (EntitasReplication.ShouldEmit()) {{ {ctx.Name}Replication.{c.TypeName}Replaced?.Invoke(creationIndex, value, 0); }}"
 					: "";
 				sb.AppendLine($"\tpublic {valueType} {c.TypeName}");
 				sb.AppendLine("\t{");
@@ -565,6 +577,100 @@ namespace RobloxCSharp.Extensions.Entitas
 			foreach (ComponentField f in c.Fields) parts.Add(f.TypeFullName);
 			parts.Add("ushort"); // serverTick (placeholder)
 			return string.Join(", ", parts);
+		}
+	}
+
+	// Per-context client mirror. Lives in Generated/{Ctx}ClientMirror.client.cs
+	// (the .client.cs suffix routes the script to StarterPlayer). Subscribes
+	// to every [Replicated] component's Add/Replace/Remove via the per-context
+	// Replication wire and applies the same call on the local mirror entity.
+	// EntitasReplication.ShouldEmit() returns false on the client, so the
+	// applied AddX/ReplaceX/RemoveX never echo back.
+	//
+	// Entity identity is the server's creationIndex carried as `serverId`
+	// in every replication payload. The mirror keeps a dictionary mapping
+	// serverId → local entity; new entities are constructed lazily on the
+	// first event for an unknown serverId.
+	internal static class ClientMirrorTemplate
+	{
+		public static string Emit(ContextModel ctx, List<ComponentModel> replicated)
+		{
+			string entityType = $"{ctx.Name}Entity";
+			string contextType = $"{ctx.Name}Context";
+
+			StringBuilder sb = new();
+			sb.AppendLine("// <auto-generated/> roblox-csharp-entitas");
+			sb.AppendLine("using System.Collections.Generic;");
+			sb.AppendLine("using Entitas;");
+			sb.AppendLine();
+			sb.AppendLine($"public sealed class {ctx.Name}ClientMirror");
+			sb.AppendLine("{");
+			sb.AppendLine($"\tprivate readonly {contextType} _context;");
+			sb.AppendLine($"\tprivate readonly Dictionary<int, {entityType}> _byServerId = new();");
+			sb.AppendLine();
+			sb.AppendLine($"\tpublic {ctx.Name}ClientMirror({contextType} context)");
+			sb.AppendLine("\t{");
+			sb.AppendLine("\t\t_context = context;");
+			foreach (ComponentModel c in replicated)
+			{
+				sb.AppendLine($"\t\t{ctx.Name}Replication.{c.TypeName}Added += On{c.TypeName}Added;");
+				if (!c.IsFlag)
+					sb.AppendLine($"\t\t{ctx.Name}Replication.{c.TypeName}Replaced += On{c.TypeName}Replaced;");
+				sb.AppendLine($"\t\t{ctx.Name}Replication.{c.TypeName}Removed += On{c.TypeName}Removed;");
+			}
+			sb.AppendLine("\t}");
+			sb.AppendLine();
+
+			// `out var x` doesn't lower today (DeclarationExpressionSyntax
+			// gap), so use the ContainsKey + indexer pattern; both have
+			// transpiler support per alpha.28.
+			sb.AppendLine($"\tprivate {entityType} GetOrCreate(int serverId)");
+			sb.AppendLine("\t{");
+			sb.AppendLine($"\t\tif (_byServerId.ContainsKey(serverId)) return _byServerId[serverId];");
+			sb.AppendLine($"\t\t{entityType} created = _context.CreateEntity();");
+			sb.AppendLine("\t\t_byServerId[serverId] = created;");
+			sb.AppendLine("\t\treturn created;");
+			sb.AppendLine("\t}");
+			sb.AppendLine();
+
+			foreach (ComponentModel c in replicated)
+			{
+				if (c.IsFlag)
+				{
+					sb.AppendLine($"\tprivate void On{c.TypeName}Added(int serverId, ushort tick)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tGetOrCreate(serverId).Is{c.TypeName} = true;");
+					sb.AppendLine("\t}");
+					sb.AppendLine();
+					sb.AppendLine($"\tprivate void On{c.TypeName}Removed(int serverId, ushort tick)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tif (_byServerId.ContainsKey(serverId)) _byServerId[serverId].Is{c.TypeName} = false;");
+					sb.AppendLine("\t}");
+				}
+				else
+				{
+					string fieldParams = string.Join(", ", c.Fields.Select(f => $"{f.TypeFullName} new{f.Name}"));
+					string fieldArgs = string.Join(", ", c.Fields.Select(f => $"new{f.Name}"));
+
+					sb.AppendLine($"\tprivate void On{c.TypeName}Added(int serverId, {fieldParams}, ushort tick)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tGetOrCreate(serverId).Add{c.TypeName}({fieldArgs});");
+					sb.AppendLine("\t}");
+					sb.AppendLine();
+					sb.AppendLine($"\tprivate void On{c.TypeName}Replaced(int serverId, {fieldParams}, ushort tick)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tGetOrCreate(serverId).Replace{c.TypeName}({fieldArgs});");
+					sb.AppendLine("\t}");
+					sb.AppendLine();
+					sb.AppendLine($"\tprivate void On{c.TypeName}Removed(int serverId, ushort tick)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tif (_byServerId.ContainsKey(serverId)) _byServerId[serverId].Remove{c.TypeName}();");
+					sb.AppendLine("\t}");
+				}
+				sb.AppendLine();
+			}
+			sb.AppendLine("}");
+			return sb.ToString();
 		}
 	}
 

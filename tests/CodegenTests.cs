@@ -607,5 +607,94 @@ namespace G {
 			Assert.DoesNotContain("Replication.", entity);
 			Assert.DoesNotContain("?.Invoke(", entity);
 		}
+
+		[Fact]
+		public void Replication_ValueFire_IsGuardedByShouldEmit()
+		{
+			// EntitasReplication.ShouldEmit returns false on the client
+			// and inside server BeginSuppress scopes, so the codegen-
+			// emitted fire-calls have to be wrapped in the guard.
+			TestHarness.Project p = Run(nameof(Replication_ValueFire_IsGuardedByShouldEmit), OneReplicatedHealth);
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			Assert.Contains("if (EntitasReplication.ShouldEmit()) { GameReplication.HealthAdded?.Invoke(", entity);
+			Assert.Contains("if (EntitasReplication.ShouldEmit()) { GameReplication.HealthReplaced?.Invoke(", entity);
+			Assert.Contains("if (EntitasReplication.ShouldEmit()) { GameReplication.HealthRemoved?.Invoke(", entity);
+		}
+
+		// ----------------------------------------------------------------
+		// Client mirror codegen — Generated/{Ctx}ClientMirror.cs
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void ClientMirror_EmittedWhenContextHasReplicatedComponent()
+		{
+			TestHarness.Project p = Run(nameof(ClientMirror_EmittedWhenContextHasReplicatedComponent), OneReplicatedHealth);
+			Assert.True(TestHarness.GeneratedExists(p, "GameClientMirror.cs"));
+		}
+
+		[Fact]
+		public void ClientMirror_NotEmittedWhenNoReplicatedComponents()
+		{
+			TestHarness.Project p = Run(nameof(ClientMirror_NotEmittedWhenNoReplicatedComponents), OneGameHealth);
+			Assert.False(TestHarness.GeneratedExists(p, "GameClientMirror.cs"));
+		}
+
+		[Fact]
+		public void ClientMirror_HoldsContextAndDictionary()
+		{
+			TestHarness.Project p = Run(nameof(ClientMirror_HoldsContextAndDictionary), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientMirror.cs");
+			Assert.Contains("using System.Collections.Generic;", mirror);
+			Assert.Contains("public sealed class GameClientMirror", mirror);
+			Assert.Contains("private readonly GameContext _context;", mirror);
+			Assert.Contains("private readonly Dictionary<int, GameEntity> _byServerId = new();", mirror);
+		}
+
+		[Fact]
+		public void ClientMirror_SubscribesViaPlusEqualsInConstructor()
+		{
+			// `+= handler` is what the roblox-csharp-networking plugin
+			// rewrites into `RemoteEvent:OnClientEvent:Connect`. The
+			// mirror's ctor wires every replicated component's
+			// Added/Replaced/Removed.
+			TestHarness.Project p = Run(nameof(ClientMirror_SubscribesViaPlusEqualsInConstructor), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientMirror.cs");
+			Assert.Contains("GameReplication.HealthAdded += OnHealthAdded;", mirror);
+			Assert.Contains("GameReplication.HealthReplaced += OnHealthReplaced;", mirror);
+			Assert.Contains("GameReplication.HealthRemoved += OnHealthRemoved;", mirror);
+		}
+
+		[Fact]
+		public void ClientMirror_GetOrCreate_UsesContainsKeyPattern()
+		{
+			// `out var` doesn't lower (DeclarationExpressionSyntax gap),
+			// so the mirror uses ContainsKey + indexer instead. This
+			// asserts we don't regress back to TryGetValue.
+			TestHarness.Project p = Run(nameof(ClientMirror_GetOrCreate_UsesContainsKeyPattern), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientMirror.cs");
+			Assert.Contains("if (_byServerId.ContainsKey(serverId)) return _byServerId[serverId];", mirror);
+			Assert.DoesNotContain("TryGetValue", mirror);
+		}
+
+		[Fact]
+		public void ClientMirror_ValueHandlers_ApplyAddReplaceRemove()
+		{
+			TestHarness.Project p = Run(nameof(ClientMirror_ValueHandlers_ApplyAddReplaceRemove), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientMirror.cs");
+			Assert.Contains("GetOrCreate(serverId).AddHealth(newValue);", mirror);
+			Assert.Contains("GetOrCreate(serverId).ReplaceHealth(newValue);", mirror);
+			Assert.Contains("if (_byServerId.ContainsKey(serverId)) _byServerId[serverId].RemoveHealth();", mirror);
+		}
+
+		[Fact]
+		public void ClientMirror_FlagHandlers_FlipIsXProperty()
+		{
+			TestHarness.Project p = Run(nameof(ClientMirror_FlagHandlers_FlipIsXProperty), OneReplicatedFlag);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientMirror.cs");
+			Assert.Contains("GetOrCreate(serverId).IsStunned = true;", mirror);
+			Assert.Contains("if (_byServerId.ContainsKey(serverId)) _byServerId[serverId].IsStunned = false;", mirror);
+			// No Replaced for flags.
+			Assert.DoesNotContain("OnStunnedReplaced", mirror);
+		}
 	}
 }
