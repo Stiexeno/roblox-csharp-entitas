@@ -1,5 +1,6 @@
 #pragma warning disable CS0626 // Methods are implemented in runtime/Group.luau, not in this assembly.
 
+using System.Collections;
 using System.Collections.Generic;
 
 namespace Entitas
@@ -22,5 +23,11 @@ namespace Entitas
 		public extern TEntity GetSingleEntity();
 
 		public extern IEnumerable<TEntity> AsEnumerable();
+
+		// IEnumerable<T> contract — needed so `foreach (var e in group)`
+		// type-checks. Lua-side iteration is wired via __iter on the Group
+		// metatable; this enumerator is the C# surface only.
+		public extern IEnumerator<TEntity> GetEnumerator();
+		extern IEnumerator IEnumerable.GetEnumerator();
 	}
 }

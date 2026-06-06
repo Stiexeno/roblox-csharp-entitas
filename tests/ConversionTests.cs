@@ -745,6 +745,34 @@ using Entitas.CodeGeneration.Attributes;
 			string user = GetUser(outputs);
 			Assert.Contains("ctx:ClearComponentPools()", user);
 		}
+
+		// ----------------------------------------------------------------
+		// Direct foreach on IGroup<T>. IGroup<T> inherits IEnumerable<T>;
+		// runtime/Group.luau's __iter metamethod makes the Luau-side
+		// generalized-for over a Group iterate its entities.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void Group_DirectForeach_LowersToGeneralizedFor()
+		{
+			Dictionary<string, string> outputs = Run(
+				nameof(Group_DirectForeach_LowersToGeneralizedFor),
+				@"namespace U {
+					[Game] public class Player : IComponent { }
+					public class Sys : IExecuteSystem {
+						private readonly IGroup<GameEntity> _g;
+						public Sys(GameContext ctx) { _g = ctx.GetGroup(GameMatcher.Player); }
+						public void Execute() {
+							foreach (var e in _g) { }
+						}
+					}
+				}");
+
+			string user = GetUser(outputs);
+			// The generalized-for shape (no `:GetEntities()` call) is what
+			// triggers Luau's __iter metamethod lookup on the group's metatable.
+			Assert.Contains("for _, e in self._g do", user);
+		}
 	}
 }
 

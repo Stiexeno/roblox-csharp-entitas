@@ -90,4 +90,18 @@ function Group:AsEnumerable()
 	return self:GetEntities()
 end
 
+-- __iter lets user code do `foreach (var e in _players)` directly
+-- without calling GetEntities() first. Luau's generalized for-loop
+-- consults __iter on the iterated value's metatable, so the C# foreach
+-- statement (lowered to `for _, v in group do`) gets each entity from
+-- the snapshot array.
+function Group:__iter()
+	local entities = self:GetEntities()
+	local i = 0
+	return function()
+		i = i + 1
+		if i <= #entities then return i, entities[i] end
+	end
+end
+
 return Group
