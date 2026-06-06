@@ -330,9 +330,13 @@ namespace RobloxCSharp.Extensions.Entitas
 			foreach (ComponentModel c in ctx.Components) sb.AppendLine($"\t\t\"{c.TypeName}\",");
 			sb.AppendLine("\t};");
 			sb.AppendLine();
+			// `typeof(global::X)` lowers to a raw `global::X` literal in
+			// Luau (transpiler doesn't strip the alias prefix inside
+			// typeof). Drop `global::` here so the emitted Lua parses.
+			// TODO: fix this transpiler-side and revert.
 			sb.AppendLine("\tpublic static readonly System.Type[] componentTypes =");
 			sb.AppendLine("\t{");
-			foreach (ComponentModel c in ctx.Components) sb.AppendLine($"\t\ttypeof({c.FullName}),");
+			foreach (ComponentModel c in ctx.Components) sb.AppendLine($"\t\ttypeof({c.FullName.Replace("global::", "")}),");
 			sb.AppendLine("\t};");
 			sb.AppendLine("}");
 			return sb.ToString();

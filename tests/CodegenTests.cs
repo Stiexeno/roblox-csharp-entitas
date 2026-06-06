@@ -160,7 +160,11 @@ namespace G {
 			TestHarness.Project p = Run(nameof(ComponentsLookup_HasComponentTypesArray), OneGamePlayer);
 			string lookup = TestHarness.ReadGenerated(p, "GameComponentsLookup.cs");
 			Assert.Contains("componentTypes", lookup);
-			Assert.Contains("typeof(global::G.Player)", lookup);
+			// `global::` is stripped on the codegen side because the
+			// transpiler doesn't strip the alias prefix inside typeof()
+			// and emits it verbatim into Luau (where `::` is a syntax error).
+			Assert.Contains("typeof(G.Player)", lookup);
+			Assert.DoesNotContain("typeof(global::", lookup);
 		}
 
 		// ----------------------------------------------------------------
