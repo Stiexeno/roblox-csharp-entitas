@@ -1,0 +1,12 @@
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# .NET build artifacts
+[Bb]in/
+[Oo]bj/
+
+# Local sandbox for end-to-end testing
+demo/

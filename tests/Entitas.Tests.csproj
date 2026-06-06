@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net9.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>disable</Nullable>
+		<IsPackable>false</IsPackable>
+	</PropertyGroup>
+
+	<!--
+		Plugin extension source is compiled into the test assembly so we
+		test the production code, not a copy. The csproj assumes
+		roblox-csharp is cloned as a sibling of roblox-csharp-entitas —
+		the same convention every plugin uses for its IDE setup.
+	-->
+	<ItemGroup>
+		<Compile Include="..\extension\**\*.cs"
+				 Exclude="..\extension\bin\**\*.cs;..\extension\obj\**\*.cs"
+				 LinkBase="extension" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\..\roblox-csharp\RobloxCSharp.Common\RobloxCSharp.Common.csproj" />
+		<ProjectReference Include="..\..\roblox-csharp\RobloxCSharp.Compiler\RobloxCSharp.Compiler.csproj" />
+		<ProjectReference Include="..\..\roblox-csharp\RobloxCSharp.Renderer\RobloxCSharp.Renderer.csproj" />
+		<ProjectReference Include="..\..\roblox-csharp\RobloxCSharp.Rojo\RobloxCSharp.Rojo.csproj" />
+		<ProjectReference Include="..\..\roblox-csharp\RobloxCSharp.Transformer\RobloxCSharp.Transformer.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="xunit" Version="2.4.2" />
+		<PackageReference Include="xunit.runner.visualstudio" Version="2.4.5" />
+		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Using Include="Xunit" />
+	</ItemGroup>
+
+</Project>

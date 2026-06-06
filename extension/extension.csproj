@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net9.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>disable</Nullable>
+		<IsPackable>false</IsPackable>
+		<!--
+			PluginExtensionLoader loads `extension.dll` from the plugin
+			root via AssemblyLoadContext. The framework types it
+			references (IRobloxCSharpExtension, …) resolve via the host's
+			Default ALC fallback, so we explicitly drop the referenced
+			assemblies from the build output — they're already loaded in
+			the host process and bundling copies would just bloat the
+			plugin checkout.
+		-->
+		<CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+		<GenerateDocumentationFile>false</GenerateDocumentationFile>
+		<DebugType>none</DebugType>
+	</PropertyGroup>
+
+	<!--
+		Project references assume roblox-csharp is cloned as a sibling
+		of roblox-csharp-entitas — the same convention every plugin uses
+		for its IDE setup.
+	-->
+	<ItemGroup>
+		<ProjectReference Include="..\..\roblox-csharp\RobloxCSharp.Common\RobloxCSharp.Common.csproj" />
+		<ProjectReference Include="..\..\roblox-csharp\RobloxCSharp.Compiler\RobloxCSharp.Compiler.csproj" />
+		<ProjectReference Include="..\..\roblox-csharp\RobloxCSharp.Renderer\RobloxCSharp.Renderer.csproj" />
+		<ProjectReference Include="..\..\roblox-csharp\RobloxCSharp.Rojo\RobloxCSharp.Rojo.csproj" />
+		<ProjectReference Include="..\..\roblox-csharp\RobloxCSharp.Transformer\RobloxCSharp.Transformer.csproj" />
+	</ItemGroup>
+
+	<!--
+		PluginExtensionLoader looks for `extension.dll` at the plugin
+		root, not inside extension/. Stage the built dll there after a
+		successful build so it ships via the plugin's git clone.
+	-->
+	<Target Name="StageExtensionDll" AfterTargets="Build">
+		<Copy SourceFiles="$(OutputPath)extension.dll" DestinationFolder="..\" SkipUnchangedFiles="true" />
+	</Target>
+
+</Project>
