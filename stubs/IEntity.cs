@@ -32,6 +32,12 @@ namespace Entitas
 
 		void RemoveAllComponents();
 
+		// Pool-aware component allocator. The codegen-emitted AddX /
+		// ReplaceX methods route through this so removed/replaced
+		// components recycle through Context._componentPools instead of
+		// churning the GC. Falls back to T.new() when the pool is empty.
+		T CreateComponent<T>(int index) where T : new();
+
 		void Destroy();
 	}
 }

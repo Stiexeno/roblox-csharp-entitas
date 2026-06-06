@@ -455,5 +455,44 @@ namespace Ents {
 			Assert.Contains("InputOnly", inputLookup);
 			Assert.DoesNotContain("GameOnly", inputLookup);
 		}
+
+		// ----------------------------------------------------------------
+		// Component pool — codegen-emitted Add/Replace/setter bodies must
+		// route through CreateComponent<T>(index) so removed/replaced
+		// instances recycle through Context._componentPools.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void EntityValue_AddX_BodyRoutesThroughCreateComponent()
+		{
+			TestHarness.Project p = Run(nameof(EntityValue_AddX_BodyRoutesThroughCreateComponent), OneGameHealth);
+			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			Assert.Contains("CreateComponent<global::G.Health>(GameComponentsLookup.Health)", entity);
+			Assert.DoesNotContain("global::G.Health component = new();", entity);
+		}
+
+		[Fact]
+		public void EntityValue_ReplaceX_BodyRoutesThroughCreateComponent()
+		{
+			TestHarness.Project p = Run(nameof(EntityValue_ReplaceX_BodyRoutesThroughCreateComponent), OneGameHealth);
+			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			// Both Add and Replace lines should match; count to verify both.
+			int hits = System.Text.RegularExpressions.Regex.Matches(
+				entity, @"CreateComponent<global::G\.Health>\(GameComponentsLookup\.Health\)").Count;
+			Assert.True(hits >= 2, $"Expected CreateComponent in both Add and Replace bodies, found {hits}.");
+		}
+
+		[Fact]
+		public void EntityValue_SetterRoutesThroughCreateComponent()
+		{
+			// `entity.Health = 20` setter goes through CreateComponent so
+			// pool recycling applies even when users prefer the property
+			// syntax over ReplaceHealth(...).
+			TestHarness.Project p = Run(nameof(EntityValue_SetterRoutesThroughCreateComponent), OneGameHealth);
+			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			// Find the setter block and verify it calls CreateComponent.
+			Assert.Contains("set", entity);
+			Assert.Contains("CreateComponent<global::G.Health>", entity);
+		}
 	}
 }

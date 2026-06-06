@@ -33,6 +33,10 @@ namespace Entitas
 		public extern bool HasAnyComponent(int[] indices);
 
 		public extern void RemoveAllComponents();
+
+		// Pool-aware allocator — see IEntity.CreateComponent for semantics.
+		public extern T CreateComponent<T>(int index) where T : new();
+
 		public extern void Destroy();
 	}
 }

@@ -3,8 +3,8 @@
 -- extensions go through AddComponent / HasComponent / etc.
 --
 -- _context back-reference is set by Context:Initialize so Destroy can push
--- this entity onto the context's reuse stack. Without that link, recycled
--- entities would just be GC'd.
+-- this entity onto the context's reuse stack, and so Remove/Replace can push
+-- displaced components onto the context's per-index componentPools stacks.
 
 local Entity = {}
 Entity.__index = Entity
@@ -33,6 +33,15 @@ function Entity:Reactivate(creationIndex)
 	self.isEnabled = true
 end
 
+-- Pushes a displaced component onto the context's pool stack for that
+-- index. No-op if there's no context (orphaned entity, test scaffolding).
+function Entity:_PushToPool(index, component)
+	if self._context == nil then return end
+	local pools = self._context._componentPools
+	if pools[index] == nil then pools[index] = {} end
+	table.insert(pools[index], component)
+end
+
 function Entity:AddComponent(index, component)
 	if not self.isEnabled then error("Cannot add component to a destroyed entity.") end
 	if self._components[index] ~= nil then
@@ -43,17 +52,26 @@ end
 
 function Entity:RemoveComponent(index)
 	if not self.isEnabled then error("Cannot remove component from a destroyed entity.") end
-	if self._components[index] == nil then
+	local existing = self._components[index]
+	if existing == nil then
 		error("Entity does not have component at index " .. tostring(index) .. ".")
 	end
 	self._components[index] = nil
+	self:_PushToPool(index, existing)
 end
 
 function Entity:ReplaceComponent(index, component)
 	if not self.isEnabled then error("Cannot replace component on a destroyed entity.") end
+	local existing = self._components[index]
 	if component == nil then
-		self._components[index] = nil
+		if existing ~= nil then
+			self._components[index] = nil
+			self:_PushToPool(index, existing)
+		end
 		return
+	end
+	if existing ~= nil then
+		self:_PushToPool(index, existing)
 	end
 	self._components[index] = component
 end
@@ -101,7 +119,25 @@ function Entity:HasAnyComponent(indices)
 end
 
 function Entity:RemoveAllComponents()
+	-- Push every live component to the pool, then clear.
+	for index, component in pairs(self._components) do
+		self:_PushToPool(index, component)
+	end
 	self._components = {}
+end
+
+-- Pool-aware allocator. The codegen-emitted AddX/ReplaceX call this with
+-- the component's class table as T (generic-erased per the converter's
+-- convention) plus the lookup index. Pops a recycled instance off the
+-- context's componentPools[index] stack if available, otherwise news up.
+function Entity:CreateComponent(T, index)
+	if self._context ~= nil then
+		local pool = self._context._componentPools[index]
+		if pool and #pool > 0 then
+			return table.remove(pool)
+		end
+	end
+	return T.new()
 end
 
 function Entity:Destroy()

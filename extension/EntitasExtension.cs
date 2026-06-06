@@ -358,18 +358,15 @@ namespace RobloxCSharp.Extensions.Entitas
 
 			if (unwrap)
 			{
-				// `entity.Health` reads return the Value field's type;
-				// `entity.Health = 20` writes go through ReplaceComponent
-				// (which also handles add-if-missing). Frozen-feast-style
-				// `ReplaceHealth(...)` / `AddHealth(...)` methods stay
-				// available below for chain-call or explicit semantics.
+				// Setter routes through CreateComponent<T> so the new
+				// instance comes off the pool when one's available.
 				string valueType = c.Fields[0].TypeFullName;
 				sb.AppendLine($"\tpublic {valueType} {c.TypeName}");
 				sb.AppendLine("\t{");
 				sb.AppendLine($"\t\tget {{ return (({c.FullName})GetComponent({lookup})).Value; }}");
 				sb.AppendLine("\t\tset");
 				sb.AppendLine("\t\t{");
-				sb.AppendLine($"\t\t\t{c.FullName} component = new();");
+				sb.AppendLine($"\t\t\t{c.FullName} component = CreateComponent<{c.FullName}>({lookup});");
 				sb.AppendLine($"\t\t\tcomponent.Value = value;");
 				sb.AppendLine($"\t\t\tReplaceComponent({lookup}, component);");
 				sb.AppendLine("\t\t}");
@@ -377,18 +374,18 @@ namespace RobloxCSharp.Extensions.Entitas
 			}
 			else
 			{
-				// Multi-field or single non-`Value` field — read returns
-				// the component instance. Setter doesn't apply (the user
-				// has multiple values to assign), so it stays read-only;
-				// writes go through `Replace{Name}(...)`.
 				sb.AppendLine($"\tpublic {c.FullName} {c.TypeName} {{ get {{ return ({c.FullName})GetComponent({lookup}); }} }}");
 			}
 			sb.AppendLine($"\tpublic bool Has{c.TypeName} {{ get {{ return HasComponent({lookup}); }} }}");
 
+			// AddX/ReplaceX now pull from the component pool when one's
+			// available. Pool semantics match Entitas-1.14 — the recycled
+			// instance has whatever state was on it before; the field
+			// assignments below overwrite anything we care about.
 			sb.AppendLine();
 			sb.AppendLine($"\tpublic {c.FullName} Add{c.TypeName}({ctorArgs})");
 			sb.AppendLine("\t{");
-			sb.AppendLine($"\t\t{c.FullName} component = new();");
+			sb.AppendLine($"\t\t{c.FullName} component = CreateComponent<{c.FullName}>({lookup});");
 			sb.AppendLine($"\t\t{fieldAssigns}");
 			sb.AppendLine($"\t\tAddComponent({lookup}, component);");
 			sb.AppendLine("\t\treturn component;");
@@ -397,7 +394,7 @@ namespace RobloxCSharp.Extensions.Entitas
 			sb.AppendLine();
 			sb.AppendLine($"\tpublic {c.FullName} Replace{c.TypeName}({ctorArgs})");
 			sb.AppendLine("\t{");
-			sb.AppendLine($"\t\t{c.FullName} component = new();");
+			sb.AppendLine($"\t\t{c.FullName} component = CreateComponent<{c.FullName}>({lookup});");
 			sb.AppendLine($"\t\t{fieldAssigns}");
 			sb.AppendLine($"\t\tReplaceComponent({lookup}, component);");
 			sb.AppendLine("\t\treturn component;");

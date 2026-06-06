@@ -18,9 +18,21 @@ function Context:constructor(totalComponents)
 	self._entities = {}             -- set: [entity] = true
 	self._count = 0
 	self._reusableEntities = {}     -- stack-as-array; destroyed entities live here
+	self._componentPools = {}       -- index → stack-as-array of recycled components
 	self._groups = {}               -- IMatcher → Group (keyed by table identity)
 	self._creationIndex = 0
 	self._entitiesCache = nil
+end
+
+-- Drops every component sitting on the pool stack for a single index.
+-- Useful between scenes when pooled instances might reference disposed
+-- handles (Roblox Instances, Connections, etc.).
+function Context:ClearComponentPool(index)
+	self._componentPools[index] = nil
+end
+
+function Context:ClearComponentPools()
+	self._componentPools = {}
 end
 
 -- Default no-op so direct `new Context<...>()` users get a clear error

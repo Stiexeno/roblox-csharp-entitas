@@ -659,6 +659,92 @@ using Entitas.CodeGeneration.Attributes;
 			// reuse-stack push. The lowering itself is just the method call.
 			Assert.Contains("e:Destroy()", user);
 		}
+
+		// ----------------------------------------------------------------
+		// Component pool — Add/Replace generated bodies route through
+		// CreateComponent<T> in the emitted Luau, and ClearComponentPool
+		// helpers are reachable on Context.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void Entity_AddX_GeneratedBody_LowersToCreateComponentCall()
+		{
+			Dictionary<string, string> outputs = Run(
+				nameof(Entity_AddX_GeneratedBody_LowersToCreateComponentCall),
+				@"namespace U { [Game] public class Health : IComponent { public int Value; } }");
+
+			string entity = GetEntity(outputs);
+			// The Luau body should call CreateComponent with the leading
+			// erased type-arg (Health import) and the lookup index.
+			Assert.Contains(":CreateComponent(", entity);
+		}
+
+		[Fact]
+		public void Entity_ReplaceX_GeneratedBody_LowersToCreateComponentCall()
+		{
+			Dictionary<string, string> outputs = Run(
+				nameof(Entity_ReplaceX_GeneratedBody_LowersToCreateComponentCall),
+				@"namespace U { [Game] public class Health : IComponent { public int Value; } }");
+
+			string entity = GetEntity(outputs);
+			// Both Add and Replace funnel through CreateComponent.
+			int hits = System.Text.RegularExpressions.Regex
+				.Matches(entity, @":CreateComponent\(").Count;
+			Assert.True(hits >= 2, $"Expected CreateComponent in Add and Replace, got {hits}.");
+		}
+
+		[Fact]
+		public void Entity_CreateComponent_FromUserCode_PassesTypeArgFirst()
+		{
+			// User-side `e.CreateComponent<Health>(0)` lowers with the
+			// type-arg as the leading runtime arg per the converter's
+			// generic-erasure convention (commit 3613bf0).
+			Dictionary<string, string> outputs = Run(
+				nameof(Entity_CreateComponent_FromUserCode_PassesTypeArgFirst),
+				@"namespace U {
+					[Game] public class Health : IComponent { public int Value; }
+					public class Setup {
+						public void Make(GameEntity e) {
+							Health h = e.CreateComponent<Health>(0);
+						}
+					}
+				}");
+
+			string user = GetUser(outputs);
+			Assert.Contains("e:CreateComponent(Health, 0)", user);
+		}
+
+		[Fact]
+		public void Context_ClearComponentPool_LowersToColonCall()
+		{
+			Dictionary<string, string> outputs = Run(
+				nameof(Context_ClearComponentPool_LowersToColonCall),
+				@"namespace U {
+					[Game] public class Player : IComponent { }
+					public class Setup {
+						public void OnSceneEnd(GameContext ctx) { ctx.ClearComponentPool(0); }
+					}
+				}");
+
+			string user = GetUser(outputs);
+			Assert.Contains("ctx:ClearComponentPool(0)", user);
+		}
+
+		[Fact]
+		public void Context_ClearComponentPools_LowersToColonCall()
+		{
+			Dictionary<string, string> outputs = Run(
+				nameof(Context_ClearComponentPools_LowersToColonCall),
+				@"namespace U {
+					[Game] public class Player : IComponent { }
+					public class Setup {
+						public void OnSceneEnd(GameContext ctx) { ctx.ClearComponentPools(); }
+					}
+				}");
+
+			string user = GetUser(outputs);
+			Assert.Contains("ctx:ClearComponentPools()", user);
+		}
 	}
 }
 

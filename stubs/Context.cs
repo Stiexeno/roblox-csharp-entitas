@@ -30,6 +30,14 @@ namespace Entitas
 		public extern void ResetCreationIndex();
 		public extern void Reset();
 
+		// Drains the pool stack for one component-type index — useful
+		// after a level transition when the components on the stack
+		// reference scene-bound state you don't want carried across.
+		public extern void ClearComponentPool(int index);
+
+		// Drains every pool stack at once.
+		public extern void ClearComponentPools();
+
 		// Hook the runtime fires after entity component mutations so cached
 		// groups can re-check membership.
 		public extern void NotifyComponentChanged(TEntity entity, int index, IComponent component);
