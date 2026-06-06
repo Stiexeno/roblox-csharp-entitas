@@ -42,8 +42,8 @@ function Context:CreateEntityInstance()
 	error("Context.CreateEntityInstance must be overridden by the codegen-emitted subclass.")
 end
 
-function Context:get_count() return self._count end
-function Context:get_reusableEntitiesCount() return #self._reusableEntities end
+function Context:count() return self._count end
+function Context:reusableEntitiesCount() return #self._reusableEntities end
 
 function Context:CreateEntity()
 	-- Reuse path: pop a destroyed husk off the stack and Reactivate.

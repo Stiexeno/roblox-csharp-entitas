@@ -18,7 +18,7 @@ function Group:constructor(matcher)
 	self._singleEntityCache = nil
 end
 
-function Group:get_count() return self._count end
+function Group:count() return self._count end
 
 local function invalidate(self)
 	self._entitiesCache = nil
