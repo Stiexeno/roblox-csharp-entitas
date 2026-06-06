@@ -10,6 +10,10 @@ namespace Entitas
 		int creationIndex { get; }
 		bool isEnabled { get; }
 
+		// Wires a fresh entity for use — called by Context.CreateEntity
+		// right after the concrete instance is constructed.
+		void Initialize(int creationIndex, int totalComponents);
+
 		void AddComponent(int index, IComponent component);
 		void RemoveComponent(int index);
 		void ReplaceComponent(int index, IComponent component);

@@ -44,6 +44,13 @@ namespace Entitas
 			return matcher;
 		}
 
+		// Static factory taking matchers — the non-generic Matcher.AnyOf<T>
+		// helper routes through here. Can't name this `AnyOf` (collides
+		// with the instance IAllOfMatcher.AnyOf chain method on this
+		// type's interface contracts).
+		public static IAnyOfMatcher<TEntity> AnyOfRoot(params IMatcher<TEntity>[] matchers)
+			=> AnyOfRoot(MergeIndicesFromMatchers(matchers));
+
 		public IAnyOfMatcher<TEntity> AnyOf(params int[] indices)
 		{
 			anyOfIndices = Distinct(indices);
@@ -132,6 +139,6 @@ namespace Entitas
 
 		public static IAnyOfMatcher<TEntity> AnyOf<TEntity>(params IMatcher<TEntity>[] matchers)
 			where TEntity : class, IEntity
-			=> Matcher<TEntity>.AnyOf(matchers);
+			=> Matcher<TEntity>.AnyOfRoot(matchers);
 	}
 }

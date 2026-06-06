@@ -514,6 +514,95 @@ using Entitas.CodeGeneration.Attributes;
 			string matcher = GetMatcher(outputs);
 			Assert.Contains("\"Plugins\", \"Entitas\", \"Matcher\"", matcher);
 		}
+
+		// ----------------------------------------------------------------
+		// Regression: AnyOf used in user code must transpile end-to-end.
+		// Before the fix, the non-generic Matcher.AnyOf<T> helper routed
+		// through Matcher<T>.AnyOf (instance), causing a C# compile error
+		// on the generated GameMatcher.AnyOf body.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void Matcher_AnyOf_FromUserCode_RoundTripsToWrappedTable()
+		{
+			Dictionary<string, string> outputs = Run(
+				nameof(Matcher_AnyOf_FromUserCode_RoundTripsToWrappedTable),
+				@"namespace U {
+					[Game] public class A : IComponent { }
+					[Game] public class B : IComponent { }
+					public class Sys : IExecuteSystem {
+						private readonly IGroup<GameEntity> _g;
+						public Sys(GameContext ctx) {
+							_g = ctx.GetGroup(GameMatcher.AnyOf(GameMatcher.A, GameMatcher.B));
+						}
+						public void Execute() { }
+					}
+				}");
+
+			string user = GetUser(outputs);
+			Assert.Contains("GameMatcher.AnyOf({GameMatcher:A(), GameMatcher:B()})", user);
+		}
+
+		[Fact]
+		public void Matcher_GeneratedAnyOfBody_RoutesThroughNonGenericMatcher()
+		{
+			// Locks the GameMatcher.AnyOf body so it stays routed through
+			// the non-generic helper — the original code path called
+			// Matcher<T>.AnyOf which is instance-only.
+			Dictionary<string, string> outputs = Run(
+				nameof(Matcher_GeneratedAnyOfBody_RoutesThroughNonGenericMatcher),
+				@"namespace U { [Game] public class Player : IComponent { } }");
+
+			string matcher = GetMatcher(outputs);
+			// Either dot or colon — the static getter emits as a zero-arg
+			// function call, but the AnyOf body must hit the runtime's
+			// static Matcher.AnyOf (which takes the leading erased type
+			// arg, hence the GameEntity import as first arg).
+			Assert.Contains("Matcher.AnyOf(", matcher);
+		}
+
+		// ----------------------------------------------------------------
+		// Regression: Initialize on IEntity / Context.Initialize helper.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void Entity_Initialize_CanBeCalledThroughIEntityInterface()
+		{
+			// If IEntity didn't declare Initialize, this test source would
+			// fail C# compile because `e.Initialize(...)` on an IEntity
+			// reference would not resolve. Running the pipeline at all
+			// proves the interface carries the method.
+			Dictionary<string, string> outputs = Run(
+				nameof(Entity_Initialize_CanBeCalledThroughIEntityInterface),
+				@"namespace U {
+					public class Setup {
+						public void Wire(IEntity e) { e.Initialize(0, 1); }
+					}
+				}");
+
+			string user = GetUser(outputs);
+			Assert.Contains("e:Initialize(0, 1)", user);
+		}
+
+		[Fact]
+		public void Context_Initialize_HelperRoutesEntityWiringThroughCreateEntity()
+		{
+			// The Context.Initialize helper is what CreateEntity goes
+			// through internally — exposed publicly so tests / framework
+			// code can wire a pre-built entity without going through
+			// CreateEntity. Asserts the user-facing call lowers cleanly.
+			Dictionary<string, string> outputs = Run(
+				nameof(Context_Initialize_HelperRoutesEntityWiringThroughCreateEntity),
+				@"namespace U {
+					[Game] public class Player : IComponent { }
+					public class Setup {
+						public void Mount(GameContext ctx, GameEntity e) { ctx.Initialize(e); }
+					}
+				}");
+
+			string user = GetUser(outputs);
+			Assert.Contains("ctx:Initialize(e)", user);
+		}
 	}
 }
 

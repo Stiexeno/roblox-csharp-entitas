@@ -37,15 +37,23 @@ function Context:CreateEntity()
 	if entity == nil then
 		error("CreateEntity() got nil — did the codegen emit CreateEntityInstance() on the partial context?")
 	end
+	self:Initialize(entity)
+	-- Newly created entities have no components yet, so no group will
+	-- match — defer membership computation until the first Add fires
+	-- NotifyComponentChanged.
+	return entity
+end
+
+-- Mirror of the C# stub's Context.Initialize(TEntity) helper. Wires a
+-- pre-constructed entity into this context — useful when tests / custom
+-- code skip the CreateEntity path. CreateEntity calls through here so
+-- both routes share the same bookkeeping.
+function Context:Initialize(entity)
 	entity:Initialize(self._creationIndex, self.totalComponents)
 	self._creationIndex = self._creationIndex + 1
 	self._entities[entity] = true
 	self._count = self._count + 1
 	self._entitiesCache = nil
-	-- Newly created entities have no components yet, so no group will
-	-- match — defer membership computation until the first Add fires
-	-- NotifyComponentChanged.
-	return entity
 end
 
 function Context:HasEntity(entity) return self._entities[entity] == true end
