@@ -17,20 +17,24 @@ end
 function Entity:constructor()
 	self._components = {}
 	self._context = nil
-	self.totalComponents = 0
-	self.creationIndex = 0
-	self.isEnabled = false
+	self._totalComponents = 0
+	self._creationIndex = 0
+	self._isEnabled = false
 end
 
+function Entity:totalComponents() return self._totalComponents end
+function Entity:creationIndex() return self._creationIndex end
+function Entity:isEnabled() return self._isEnabled end
+
 function Entity:Initialize(creationIndex, totalComponents)
-	self.creationIndex = creationIndex
-	self.totalComponents = totalComponents
-	self.isEnabled = true
+	self._creationIndex = creationIndex
+	self._totalComponents = totalComponents
+	self._isEnabled = true
 end
 
 function Entity:Reactivate(creationIndex)
-	self.creationIndex = creationIndex
-	self.isEnabled = true
+	self._creationIndex = creationIndex
+	self._isEnabled = true
 end
 
 -- Pushes a displaced component onto the context's pool stack for that
@@ -42,31 +46,42 @@ function Entity:_PushToPool(index, component)
 	table.insert(pools[index], component)
 end
 
+-- Notifies the context that this entity's component at `index` changed.
+-- Context fans out to every cached group, which re-checks matcher membership.
+function Entity:_NotifyContext(index, component)
+	if self._context ~= nil then
+		self._context:NotifyComponentChanged(self, index, component)
+	end
+end
+
 function Entity:AddComponent(index, component)
-	if not self.isEnabled then error("Cannot add component to a destroyed entity.") end
+	if not self._isEnabled then error("Cannot add component to a destroyed entity.") end
 	if self._components[index] ~= nil then
 		error("Entity already has component at index " .. tostring(index) .. ".")
 	end
 	self._components[index] = component
+	self:_NotifyContext(index, component)
 end
 
 function Entity:RemoveComponent(index)
-	if not self.isEnabled then error("Cannot remove component from a destroyed entity.") end
+	if not self._isEnabled then error("Cannot remove component from a destroyed entity.") end
 	local existing = self._components[index]
 	if existing == nil then
 		error("Entity does not have component at index " .. tostring(index) .. ".")
 	end
 	self._components[index] = nil
 	self:_PushToPool(index, existing)
+	self:_NotifyContext(index, nil)
 end
 
 function Entity:ReplaceComponent(index, component)
-	if not self.isEnabled then error("Cannot replace component on a destroyed entity.") end
+	if not self._isEnabled then error("Cannot replace component on a destroyed entity.") end
 	local existing = self._components[index]
 	if component == nil then
 		if existing ~= nil then
 			self._components[index] = nil
 			self:_PushToPool(index, existing)
+			self:_NotifyContext(index, nil)
 		end
 		return
 	end
@@ -74,6 +89,7 @@ function Entity:ReplaceComponent(index, component)
 		self:_PushToPool(index, existing)
 	end
 	self._components[index] = component
+	self:_NotifyContext(index, component)
 end
 
 function Entity:GetComponent(index)
@@ -142,7 +158,7 @@ end
 
 function Entity:Destroy()
 	self:RemoveAllComponents()
-	self.isEnabled = false
+	self._isEnabled = false
 	-- Hand the husk back to the context for reuse. The context
 	-- removes us from its active set and pushes us onto its
 	-- _reusableEntities stack; the next CreateEntity pops + Reactivates.

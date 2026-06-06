@@ -74,6 +74,13 @@ function Matcher:indices()
 	return self:GetIndices()
 end
 
+-- C# stub property `componentNames` has `{ get; set; }`. The codegen-emitted
+-- GameMatcher writes labels via `m:set_componentNames(...)` after AllOf; the
+-- getter reads from the same backing field. Internal Lua code keeps reading
+-- `self.componentNames` directly (instance lookup beats the metatable).
+function Matcher:componentNames() return self.componentNames end
+function Matcher:set_componentNames(value) self.componentNames = value end
+
 -- Static surface called by the codegen-emitted GameMatcher.AllOf etc.
 -- The leading `_T` is the converter's erased type arg — ignored here.
 function Matcher.AllOf(_T, matchers)

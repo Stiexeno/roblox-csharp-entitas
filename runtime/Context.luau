@@ -14,7 +14,7 @@ function Context.new(totalComponents)
 end
 
 function Context:constructor(totalComponents)
-	self.totalComponents = totalComponents or 0
+	self._totalComponents = totalComponents or 0
 	self._entities = {}             -- set: [entity] = true
 	self._count = 0
 	self._reusableEntities = {}     -- stack-as-array; destroyed entities live here
@@ -42,6 +42,7 @@ function Context:CreateEntityInstance()
 	error("Context.CreateEntityInstance must be overridden by the codegen-emitted subclass.")
 end
 
+function Context:totalComponents() return self._totalComponents end
 function Context:count() return self._count end
 function Context:reusableEntitiesCount() return #self._reusableEntities end
 
@@ -73,7 +74,7 @@ end
 -- the entity onto _reusableEntities later.
 function Context:Initialize(entity)
 	entity._context = self
-	entity:Initialize(self._creationIndex, self.totalComponents)
+	entity:Initialize(self._creationIndex, self._totalComponents)
 	self._creationIndex = self._creationIndex + 1
 	self._entities[entity] = true
 	self._count = self._count + 1
