@@ -11,7 +11,7 @@ function Group.new(matcher)
 end
 
 function Group:constructor(matcher)
-	self.matcher = matcher
+	self._matcher = matcher
 	self._entities = {}   -- set: [entity] = true
 	self._count = 0
 	self._entitiesCache = nil
@@ -19,6 +19,7 @@ function Group:constructor(matcher)
 end
 
 function Group:count() return self._count end
+function Group:matcher() return self._matcher end
 
 local function invalidate(self)
 	self._entitiesCache = nil
@@ -26,7 +27,7 @@ local function invalidate(self)
 end
 
 function Group:HandleEntitySilently(entity)
-	if self.matcher:Matches(entity) then
+	if self._matcher:Matches(entity) then
 		if not self._entities[entity] then
 			self._entities[entity] = true
 			self._count = self._count + 1
