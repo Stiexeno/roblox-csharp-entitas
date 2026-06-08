@@ -873,8 +873,10 @@ namespace G { [Game, Unique] public class Score : IComponent { public int Value;
 			// _SetGameSessionEntity(this) after AddComponent.
 			TestHarness.Project p = Run(nameof(Unique_Flag_EntitySetter_TailUpdatesContextField), OneUniqueFlag);
 			string comp = TestHarness.ReadGenerated(p, "Components/Game.GameSession.cs");
-			Assert.Contains("(GameContext)context)._SetGameSessionEntity(this);", comp);
-			Assert.Contains("(GameContext)context)._ClearGameSessionEntity();", comp);
+			// Captures `context` once via `{ GameContext _ctx = (GameContext)context; if (_ctx != null) ... }`
+			// to halve the `self:context()` accessor count in Lua.
+			Assert.Contains("_ctx._SetGameSessionEntity(this)", comp);
+			Assert.Contains("_ctx._ClearGameSessionEntity()", comp);
 		}
 
 		[Fact]
@@ -903,9 +905,9 @@ namespace G { [Game, Unique] public class Score : IComponent { public int Value;
 			TestHarness.Project p = Run(nameof(Unique_Value_EntityAddReplaceRemove_TailUpdateContextField), OneUniqueValue);
 			string comp = TestHarness.ReadGenerated(p, "Components/Game.Score.cs");
 			int setHits = System.Text.RegularExpressions.Regex.Matches(
-				comp, @"\(GameContext\)context\)\._SetScoreEntity\(this\);").Count;
+				comp, @"_ctx\._SetScoreEntity\(this\);").Count;
 			Assert.True(setHits >= 3, $"Expected _SetScoreEntity in Add + Replace + setter, found {setHits}.");
-			Assert.Contains("(GameContext)context)._ClearScoreEntity();", comp);
+			Assert.Contains("_ctx._ClearScoreEntity();", comp);
 		}
 
 		[Fact]
@@ -1022,7 +1024,7 @@ namespace G {
 		{
 			TestHarness.Project p = Run(nameof(PrimaryIndex_EntityAdd_RegistersKey), OnePrimaryIndexedUser);
 			string comp = TestHarness.ReadGenerated(p, "Components/Game.User.cs");
-			Assert.Contains("(GameContext)context)._RegisterUser(this, newUserId);", comp);
+			Assert.Contains("_ctx._RegisterUser(this, newUserId);", comp);
 		}
 
 		[Fact]

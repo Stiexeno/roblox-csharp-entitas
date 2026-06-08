@@ -507,6 +507,11 @@ namespace RobloxCSharp.Extensions.Entities
 			// tail-update the context's singleton field through the
 			// codegen-emitted _Set/_Clear hook — the entity API stays the
 			// same shape, the context just tracks who holds the flag.
+			//
+			// Context-capture pattern (`{ var _ctx = (Ctx)context; if … }`)
+			// halves the `self:context()` accessor count in Lua: the cast
+			// evaluates `context` once and the null check then reads the
+			// local — instead of two accessor calls per hook fire.
 			string fireAdd = c.IsReplicated
 				? $" if (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueSet(\"{ctx.Name}\", {lookup}, creationIndex);"
 				: "";
@@ -514,10 +519,10 @@ namespace RobloxCSharp.Extensions.Entities
 				? $" if (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueRemove(\"{ctx.Name}\", {lookup}, creationIndex);"
 				: "";
 			string uniqueSet = c.IsUnique
-				? $" if (context != null) (({ctx.Name}Context)context)._Set{c.TypeName}Entity(this);"
+				? $" {{ {ctx.Name}Context _ctx = ({ctx.Name}Context)context; if (_ctx != null) _ctx._Set{c.TypeName}Entity(this); }}"
 				: "";
 			string uniqueClear = c.IsUnique
-				? $" if (context != null) (({ctx.Name}Context)context)._Clear{c.TypeName}Entity();"
+				? $" {{ {ctx.Name}Context _ctx = ({ctx.Name}Context)context; if (_ctx != null) _ctx._Clear{c.TypeName}Entity(); }}"
 				: "";
 
 			sb.AppendLine($"\tstatic readonly {c.FullName} _{c.TypeName}Component = new();");
@@ -558,17 +563,6 @@ namespace RobloxCSharp.Extensions.Entities
 			string fireRemove = c.IsReplicated
 				? $"\t\tif (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueRemove(\"{ctx.Name}\", {lookup}, creationIndex);"
 				: "";
-			// [Unique] singleton tracking — AddX / Replace / setter route
-			// `this` into the context's _xEntity field; RemoveX clears it.
-			// Casts through the typed {Ctx}Context partial that
-			// UniqueContextPartialTemplate emits.
-			string uniqueSet = c.IsUnique
-				? $"\t\tif (context != null) (({ctx.Name}Context)context)._Set{c.TypeName}Entity(this);"
-				: "";
-			string uniqueClear = c.IsUnique
-				? $"\t\tif (context != null) (({ctx.Name}Context)context)._Clear{c.TypeName}Entity();"
-				: "";
-
 			// [EntityIndex] / [PrimaryEntityIndex] dict maintenance — keys
 			// on field values. AddX registers the new key; ReplaceX captures
 			// the old key (read off `this.{Component}` before the swap) and
@@ -583,6 +577,25 @@ namespace RobloxCSharp.Extensions.Entities
 			string IndexSuffix(ComponentField f) => indexedFieldCount > 1 ? f.Name : "";
 			string ReadField(ComponentField f) => (unwrap && f.Name == "Value") ? c.TypeName : $"{c.TypeName}.{f.Name}";
 
+			// All post-mutation context hooks ([Unique] + [EntityIndex])
+			// share one `{ var _ctx = (Ctx)context; if (_ctx != null) {...} }`
+			// block so we only access `context` once (single self:context()
+			// call in the Lua emit instead of one-per-hook). EmitContextBlock
+			// stamps the boilerplate; callers append per-hook lines via the
+			// stringbuilder closure.
+			bool HasContextHooks() => c.IsUnique || indexedFields.Count > 0;
+			void EmitContextBlock(string indent, System.Action<string> body)
+			{
+				if (!HasContextHooks()) return;
+				sb.AppendLine($"{indent}{{");
+				sb.AppendLine($"{indent}\t{ctx.Name}Context _ctx = ({ctx.Name}Context)context;");
+				sb.AppendLine($"{indent}\tif (_ctx != null)");
+				sb.AppendLine($"{indent}\t{{");
+				body($"{indent}\t\t");
+				sb.AppendLine($"{indent}\t}}");
+				sb.AppendLine($"{indent}}}");
+			}
+
 			if (unwrap)
 			{
 				// Setter routes through CreateComponent<T> so the new
@@ -590,9 +603,6 @@ namespace RobloxCSharp.Extensions.Entities
 				string valueType = c.Fields[0].TypeFullName;
 				string fireSetter = c.IsReplicated
 					? $"\t\t\tif (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueSet(\"{ctx.Name}\", {lookup}, creationIndex, value);"
-					: "";
-				string uniqueSetter = c.IsUnique
-					? $"\t\t\tif (context != null) (({ctx.Name}Context)context)._Set{c.TypeName}Entity(this);"
 					: "";
 				sb.AppendLine($"\tpublic {valueType} {c.TypeName}");
 				sb.AppendLine("\t{");
@@ -609,18 +619,17 @@ namespace RobloxCSharp.Extensions.Entities
 				sb.AppendLine($"\t\t\tcomponent.Value = value;");
 				sb.AppendLine($"\t\t\tReplaceComponent({lookup}, component);");
 				if (c.IsReplicated) sb.AppendLine(fireSetter);
-				if (c.IsUnique) sb.AppendLine(uniqueSetter);
-				if (c.Fields[0].IsIndexed)
+				EmitContextBlock("\t\t\t", indent =>
 				{
-					ComponentField f = c.Fields[0];
-					string suffix = IndexSuffix(f);
-					sb.AppendLine($"\t\t\tif (context != null)");
-					sb.AppendLine("\t\t\t{");
-					sb.AppendLine($"\t\t\t\t{ctx.Name}Context _ctx = ({ctx.Name}Context)context;");
-					sb.AppendLine($"\t\t\t\tif (_had{c.TypeName}) _ctx._Unregister{c.TypeName}{suffix}(this, _prevValue);");
-					sb.AppendLine($"\t\t\t\t_ctx._Register{c.TypeName}{suffix}(this, value);");
-					sb.AppendLine("\t\t\t}");
-				}
+					if (c.IsUnique) sb.AppendLine($"{indent}_ctx._Set{c.TypeName}Entity(this);");
+					if (c.Fields[0].IsIndexed)
+					{
+						ComponentField f = c.Fields[0];
+						string suffix = IndexSuffix(f);
+						sb.AppendLine($"{indent}if (_had{c.TypeName}) _ctx._Unregister{c.TypeName}{suffix}(this, _prevValue);");
+						sb.AppendLine($"{indent}_ctx._Register{c.TypeName}{suffix}(this, value);");
+					}
+				});
 				sb.AppendLine("\t\t}");
 				sb.AppendLine("\t}");
 			}
@@ -641,12 +650,15 @@ namespace RobloxCSharp.Extensions.Entities
 			sb.AppendLine($"\t\t{fieldAssigns}");
 			sb.AppendLine($"\t\tAddComponent({lookup}, component);");
 			if (c.IsReplicated) sb.AppendLine(fireSet);
-			if (c.IsUnique) sb.AppendLine(uniqueSet);
-			foreach (ComponentField f in indexedFields)
+			EmitContextBlock("\t\t", indent =>
 			{
-				string suffix = IndexSuffix(f);
-				sb.AppendLine($"\t\tif (context != null) (({ctx.Name}Context)context)._Register{c.TypeName}{suffix}(this, new{f.Name});");
-			}
+				if (c.IsUnique) sb.AppendLine($"{indent}_ctx._Set{c.TypeName}Entity(this);");
+				foreach (ComponentField f in indexedFields)
+				{
+					string suffix = IndexSuffix(f);
+					sb.AppendLine($"{indent}_ctx._Register{c.TypeName}{suffix}(this, new{f.Name});");
+				}
+			});
 			sb.AppendLine("\t\treturn component;");
 			sb.AppendLine("\t}");
 
@@ -665,20 +677,16 @@ namespace RobloxCSharp.Extensions.Entities
 			sb.AppendLine($"\t\t{fieldAssigns}");
 			sb.AppendLine($"\t\tReplaceComponent({lookup}, component);");
 			if (c.IsReplicated) sb.AppendLine(fireSet);
-			if (c.IsUnique) sb.AppendLine(uniqueSet);
-			if (indexedFields.Count > 0)
+			EmitContextBlock("\t\t", indent =>
 			{
-				sb.AppendLine("\t\tif (context != null)");
-				sb.AppendLine("\t\t{");
-				sb.AppendLine($"\t\t\t{ctx.Name}Context _ctx = ({ctx.Name}Context)context;");
+				if (c.IsUnique) sb.AppendLine($"{indent}_ctx._Set{c.TypeName}Entity(this);");
 				foreach (ComponentField f in indexedFields)
 				{
 					string suffix = IndexSuffix(f);
-					sb.AppendLine($"\t\t\tif (_had{c.TypeName}) _ctx._Unregister{c.TypeName}{suffix}(this, _prev{f.Name});");
-					sb.AppendLine($"\t\t\t_ctx._Register{c.TypeName}{suffix}(this, new{f.Name});");
+					sb.AppendLine($"{indent}if (_had{c.TypeName}) _ctx._Unregister{c.TypeName}{suffix}(this, _prev{f.Name});");
+					sb.AppendLine($"{indent}_ctx._Register{c.TypeName}{suffix}(this, new{f.Name});");
 				}
-				sb.AppendLine("\t\t}");
-			}
+			});
 			sb.AppendLine("\t\treturn component;");
 			sb.AppendLine("\t}");
 
@@ -693,19 +701,15 @@ namespace RobloxCSharp.Extensions.Entities
 				sb.AppendLine($"\t\tbool _had{c.TypeName} = Has{c.TypeName};");
 			sb.AppendLine($"\t\tRemoveComponent({lookup});");
 			if (c.IsReplicated) sb.AppendLine(fireRemove);
-			if (c.IsUnique) sb.AppendLine(uniqueClear);
-			if (indexedFields.Count > 0)
+			EmitContextBlock("\t\t", indent =>
 			{
-				sb.AppendLine($"\t\tif (_had{c.TypeName} && context != null)");
-				sb.AppendLine("\t\t{");
-				sb.AppendLine($"\t\t\t{ctx.Name}Context _ctx = ({ctx.Name}Context)context;");
+				if (c.IsUnique) sb.AppendLine($"{indent}_ctx._Clear{c.TypeName}Entity();");
 				foreach (ComponentField f in indexedFields)
 				{
 					string suffix = IndexSuffix(f);
-					sb.AppendLine($"\t\t\t_ctx._Unregister{c.TypeName}{suffix}(this, _prev{f.Name});");
+					sb.AppendLine($"{indent}if (_had{c.TypeName}) _ctx._Unregister{c.TypeName}{suffix}(this, _prev{f.Name});");
 				}
-				sb.AppendLine("\t\t}");
-			}
+			});
 			sb.AppendLine("\t}");
 		}
 	}

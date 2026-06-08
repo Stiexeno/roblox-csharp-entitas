@@ -93,8 +93,14 @@ Alpha.
 - Property-shaped value components (`public int Value { get; set; }`) — codegen ignores property-backed fields; only plain public fields are picked up
 - Client prediction + reconciliation — `serverTick` is on the wire now; the rest of the prediction stack (speculative state, rollback) isn't
 - Snapshot delta compression — pagination handles payload size, but every Ready ping still sends the full world. A "what's changed since last seen" pass would cut bandwidth on reconnect
+- Buffer-typed wire — replace the `{opcode, componentIndex, entityId, ...fields}` Lua-table ops with Roblox `buffer` packing for ~3–5× bandwidth + near-zero per-tick GC. Substantial refactor (stub + runtime + codegen + snapshot split); landing in a dedicated commit
 - Visual debugger
 - Group lifecycle hooks (`OnEntityAdded` / `OnEntityRemoved`) — useful for reactive systems if/when that pattern lands
+
+### Internal optimizations
+
+- `Context:NotifyComponentChanged` routes through `_groupsByIndex[componentIndex]` so a mutation only touches groups whose matcher includes that index — 10–50× speedup once you have more than a handful of groups
+- Codegen-emitted entity AddX / ReplaceX / RemoveX / setter bodies share one `{ var _ctx = (Ctx)context; if (_ctx != null) {...} }` block for every `[Unique]` + `[EntityIndex]` hook fire, halving the `self:context()` accessor count in Lua
 
 ### Won't be added
 
