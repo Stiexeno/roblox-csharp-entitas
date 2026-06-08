@@ -8,22 +8,23 @@ description: Transpiler-specific quirks when writing C# that lowers to Luau
 
 The roblox-csharp transpiler covers most of C# but has gaps and Roblox-specific routing rules. Avoid the patterns below.
 
-## Language features that don't lower (yet)
+## Language features — what lowers, what doesn't
 
-- **`out var`** — `DeclarationExpressionSyntax` isn't lowered. Use `ContainsKey + indexer` instead of `TryGetValue`:
+- **`async` / `await`** — `AwaitExpressionTransformer` unwraps `await foo()` to `foo()` (the call runs synchronously in Luau). The `async` keyword on the method signature is a no-op on lowering. True coroutine wrapping (per the renderer's TODO list) isn't done yet — so `await` is structural compatibility, not actual asynchrony. If you need real concurrency, use Roblox's `task.spawn(fn)` / `task.delay(seconds, fn)` / `task.wait(seconds)`.
+- **`out` parameters in method declarations** — work fine. The converter's own sample (`RobloxCSharp.Tests/.../Kitchen.cs`) uses `Calculate(ref int a, out int b, in int c, params int[] values)`.
+- **`out var` at a call site** — **uncertain, needs verification before relying on it**. There's no explicit `DeclarationExpressionSyntax` handler in the transformer. Roslyn may pass it through as a regular argument-with-declaration, but the codegen-emitted entity bodies in this repo deliberately use `ContainsKey + indexer` instead (see `ClientReplicationTemplate` in the entities plugin) — so the safer pattern is:
   ```csharp
-  // BAD: doesn't transpile cleanly
-  if (dict.TryGetValue(key, out var value)) { ... }
-
-  // GOOD
+  // SAFE
   if (dict.ContainsKey(key)) {
       TValue value = dict[key];
       // ...
   }
+
+  // POSSIBLY OK — test in your project first
+  if (dict.TryGetValue(key, out int v)) { ... }
   ```
-- **Pattern matching with `is X y`** — same `DeclarationExpressionSyntax` issue. Use explicit cast + null check.
+- **Pattern matching with `is X y`** — likely the same `DeclarationExpressionSyntax` story. Use explicit cast + null check until verified.
 - **Tuple deconstruction in declarations** — avoid `(int a, int b) = method()`. Use named struct returns or two calls.
-- **`async`/`await` (with C# Task)** — no equivalent. Use Roblox's `task.spawn(fn)` / `task.delay(seconds, fn)` / `task.wait(seconds)` directly (these are exposed as static methods via the Roblox API stubs).
 
 ## Numeric / indexing
 
