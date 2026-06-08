@@ -65,6 +65,17 @@ public class Player : IComponent
 // generates gameContext.GetEntityWithPlayer(userId) — O(1)
 ```
 
+**Watched component (reactive change signal):**
+```csharp
+[Game, Watched] public class Health : IComponent { public int Value; }
+// generates a `HealthChanged` flag and patches the entity's AddHealth /
+// ReplaceHealth / setter to `IsHealthChanged = true`. Reactive systems
+// gate on `GameMatcher.AllOf(GameMatcher.Health, GameMatcher.HealthChanged)`
+// to see only entities whose Health changed this frame. Don't forget to
+// add `new GameWatchedCleanupSystem(game)` to the tail of your feature
+// pipeline so the Changed flag clears at end of frame.
+```
+
 ### Full file template
 
 ```csharp

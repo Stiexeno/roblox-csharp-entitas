@@ -85,6 +85,7 @@ Alpha.
 - `[Unique]` codegen — context-level singleton accessors (`isPlayer` / `playerEntity` / `SetPlayer()` / `UnsetPlayer()`) with auto-track through entity AddX / RemoveX hooks; conflicting assignment throws
 - `[PostConstructor]` — methods on `partial class Contexts` carrying the attribute are called at the tail of the generated `Contexts()` ctor
 - `[EntityIndex]` / `[PrimaryEntityIndex]` — field-level. Primary emits `Dictionary<TKey, {Ctx}Entity>` + `GetEntityWith{Component}(TKey)`; non-primary emits `Dictionary<TKey, HashSet<{Ctx}Entity>>` + `GetEntitiesWith{Component}(TKey)`. Entity AddX / ReplaceX / RemoveX / setter bodies tail-update the dict
+- `[Watched]` — class-level. Synthesizes a `{Name}Changed` flag component, patches state-mutating entity bodies to raise it on Add / Replace / setter (flag flip in either direction), and emits a `{Ctx}WatchedCleanupSystem` you add to the tail of your feature pipeline. Reactive systems gate on `GameMatcher.AllOf(GameMatcher.Health, GameMatcher.HealthChanged)` — no polling cache needed. Local-only signal; composes naturally with `[Replicated]` since the client's `Apply{X}` calls `Replace{X}` which raises Changed locally too
 - Direct `foreach (var e in group)` via `IGroup<T>:__iter` (no `.GetEntities()` needed)
 - `Entity.Destroy()` is virtual; codegen-emitted `{Ctx}Entity` override pre-fires `RemoveX` (or `IsX = false`) on every hooked component before base teardown, so direct destroy keeps `[Replicated]`, `[Unique]`, and `[EntityIndex]` state consistent
 

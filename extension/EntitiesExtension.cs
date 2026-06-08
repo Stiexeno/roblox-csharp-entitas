@@ -64,6 +64,7 @@ namespace RobloxCSharp.Extensions.Entities
 				EntityIndex = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.EntityIndexAttribute"),
 				PrimaryEntityIndex = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.PrimaryEntityIndexAttribute"),
 				PostConstructor = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.PostConstructorAttribute"),
+				Watched = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.WatchedAttribute"),
 			};
 			if (attrs.Component is null || attrs.Context is null) return;
 
@@ -126,8 +127,31 @@ namespace RobloxCSharp.Extensions.Entities
 			Directory.CreateDirectory(genDir);
 			string componentsDir = Path.Combine(genDir, "Components");
 			Directory.CreateDirectory(componentsDir);
+			string watchedDir = Path.Combine(genDir, "Watched");
 
 			HashSet<string> expectedComponentFiles = new(StringComparer.OrdinalIgnoreCase);
+			HashSet<string> expectedWatchedFiles = new(StringComparer.OrdinalIgnoreCase);
+
+			// [Watched] synthesis — for every [Watched] component, append a
+			// {Name}Changed flag ComponentModel to the same context and
+			// emit a C# class file for it so user code can reference the
+			// type. The flag flows through the normal codegen pipeline
+			// from here (gets a lookup index, a matcher, an IsXChanged
+			// entity property).
+			foreach (ContextModel ctx in byContext.Values)
+			{
+				List<ComponentModel> toSynthesize = ctx.Components.Where(c => c.IsWatched).ToList();
+				if (toSynthesize.Count > 0) Directory.CreateDirectory(watchedDir);
+				foreach (ComponentModel src in toSynthesize)
+				{
+					ComponentModel changed = ComponentModel.CreateChangedFlag(src);
+					ctx.Components.Add(changed);
+
+					string fileName = $"{src.TypeName}Changed.cs";
+					WriteFile(watchedDir, fileName, WatchedFlagClassTemplate.Emit(src));
+					expectedWatchedFiles.Add(fileName);
+				}
+			}
 
 			foreach (ContextModel ctx in byContext.Values)
 			{
@@ -172,6 +196,25 @@ namespace RobloxCSharp.Extensions.Entities
 					if (File.Exists(clientReplicationFile)) File.Delete(clientReplicationFile);
 				}
 
+				// [Watched] cleanup — emit per context when any component
+				// in the context is [Watched]. The user adds it to the
+				// tail of their feature pipeline; it clears every Changed
+				// flag at end of frame so reactive systems see one-frame
+				// signals.
+				List<ComponentModel> watchedSources = ctx.Components
+					.Where(c => c.IsWatched && !c.IsSynthesizedChangedFlag)
+					.ToList();
+				string cleanupFile = Path.Combine(genDir, $"{ctx.Name}WatchedCleanupSystem.cs");
+				if (watchedSources.Count > 0)
+				{
+					WriteFile(genDir, $"{ctx.Name}WatchedCleanupSystem.cs",
+						WatchedCleanupSystemTemplate.Emit(ctx, watchedSources));
+				}
+				else if (File.Exists(cleanupFile))
+				{
+					File.Delete(cleanupFile);
+				}
+
 				// Sweep files from prior slice shapes — the per-component
 				// fanout (Replication.cs static delegate class) and the
 				// renamed-from ClientMirror variants. Always delete; the
@@ -192,6 +235,18 @@ namespace RobloxCSharp.Extensions.Entities
 			{
 				string name = Path.GetFileName(existing);
 				if (!expectedComponentFiles.Contains(name)) File.Delete(existing);
+			}
+
+			// Same reaping for the [Watched] Changed-flag class files. If
+			// a user drops [Watched] from a component, the synthesized
+			// {Name}Changed.cs from a prior run disappears.
+			if (Directory.Exists(watchedDir))
+			{
+				foreach (string existing in Directory.EnumerateFiles(watchedDir, "*.cs"))
+				{
+					string name = Path.GetFileName(existing);
+					if (!expectedWatchedFiles.Contains(name)) File.Delete(existing);
+				}
 			}
 		}
 
@@ -315,6 +370,7 @@ namespace RobloxCSharp.Extensions.Entities
 		public INamedTypeSymbol EntityIndex;
 		public INamedTypeSymbol PrimaryEntityIndex;
 		public INamedTypeSymbol PostConstructor;
+		public INamedTypeSymbol Watched;
 
 		public static bool HasAttribute(ISymbol symbol, INamedTypeSymbol attr)
 		{
@@ -330,13 +386,18 @@ namespace RobloxCSharp.Extensions.Entities
 	internal sealed class ComponentModel
 	{
 		public INamedTypeSymbol Symbol { get; }
-		public string TypeName => Symbol.Name;
+		public string TypeName { get; }
 		public string FullName { get; }
 		public string NamespaceName { get; }
 		public List<ComponentField> Fields { get; }
 		public bool IsFlag => Fields.Count == 0;
 		public bool IsReplicated { get; }
 		public bool IsUnique { get; }
+		public bool IsWatched { get; }
+		// True for the synthesized {X}Changed flag we auto-generate for
+		// every [Watched] component. Codegen needs to know so it can skip
+		// emitting hook code on the Changed itself (no Changed-of-Changed).
+		public bool IsSynthesizedChangedFlag { get; }
 		public bool HasIndexedField
 		{
 			get
@@ -349,8 +410,11 @@ namespace RobloxCSharp.Extensions.Entities
 		public ComponentModel(INamedTypeSymbol symbol, AttributeSymbols attrs)
 		{
 			Symbol = symbol;
+			TypeName = symbol.Name;
 			IsReplicated = AttributeSymbols.HasAttribute(symbol, attrs.Replicated);
 			IsUnique = AttributeSymbols.HasAttribute(symbol, attrs.Unique);
+			IsWatched = AttributeSymbols.HasAttribute(symbol, attrs.Watched);
+			IsSynthesizedChangedFlag = false;
 			FullName = symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 			NamespaceName = symbol.ContainingNamespace?.IsGlobalNamespace == false
 				? symbol.ContainingNamespace.ToDisplayString()
@@ -371,6 +435,29 @@ namespace RobloxCSharp.Extensions.Entities
 				// if a user reports needing them.
 			}
 		}
+
+		// Synthesized {Name}Changed flag for a [Watched] component. No
+		// Roslyn symbol exists — codegen also emits the C# class file
+		// (in PreSourceDiscovery) so user code can reference the type.
+		// The synthesized model carries no attributes (no Replicated,
+		// Unique, etc.) and is a pure flag; its only job is to be a
+		// marker that the cleanup system can find.
+		private ComponentModel(ComponentModel source)
+		{
+			Symbol = null;
+			TypeName = source.TypeName + "Changed";
+			NamespaceName = source.NamespaceName;
+			FullName = source.NamespaceName is null
+				? "global::" + TypeName
+				: "global::" + source.NamespaceName + "." + TypeName;
+			Fields = new List<ComponentField>();
+			IsReplicated = false;
+			IsUnique = false;
+			IsWatched = false;
+			IsSynthesizedChangedFlag = true;
+		}
+
+		public static ComponentModel CreateChangedFlag(ComponentModel source) => new(source);
 	}
 
 	internal enum FieldIndexKind { None, Index, PrimaryIndex }
@@ -524,6 +611,13 @@ namespace RobloxCSharp.Extensions.Entities
 			string uniqueClear = c.IsUnique
 				? $" {{ {ctx.Name}Context _ctx = ({ctx.Name}Context)context; if (_ctx != null) _ctx._Clear{c.TypeName}Entity(); }}"
 				: "";
+			// [Watched] flag — both branches of the Is{X} setter raise the
+			// Changed signal because a flag flip is a change in either
+			// direction. Reactive systems gate on `Is{X}Changed`; the
+			// codegen-emitted cleanup system wipes it at end of frame.
+			string watchedFlag = c.IsWatched
+				? $" Is{c.TypeName}Changed = true;"
+				: "";
 
 			sb.AppendLine($"\tstatic readonly {c.FullName} _{c.TypeName}Component = new();");
 			sb.AppendLine($"\tpublic bool Is{c.TypeName}");
@@ -533,8 +627,8 @@ namespace RobloxCSharp.Extensions.Entities
 			sb.AppendLine("\t\t{");
 			sb.AppendLine($"\t\t\tif (value != Is{c.TypeName})");
 			sb.AppendLine("\t\t\t{");
-			sb.AppendLine($"\t\t\t\tif (value) {{ AddComponent({lookup}, _{c.TypeName}Component);{fireAdd}{uniqueSet} }}");
-			sb.AppendLine($"\t\t\t\telse {{ RemoveComponent({lookup});{fireRemove}{uniqueClear} }}");
+			sb.AppendLine($"\t\t\t\tif (value) {{ AddComponent({lookup}, _{c.TypeName}Component);{fireAdd}{uniqueSet}{watchedFlag} }}");
+			sb.AppendLine($"\t\t\t\telse {{ RemoveComponent({lookup});{fireRemove}{uniqueClear}{watchedFlag} }}");
 			sb.AppendLine("\t\t\t}");
 			sb.AppendLine("\t\t}");
 			sb.AppendLine("\t}");
@@ -630,6 +724,7 @@ namespace RobloxCSharp.Extensions.Entities
 						sb.AppendLine($"{indent}_ctx._Register{c.TypeName}{suffix}(this, value);");
 					}
 				});
+				if (c.IsWatched) sb.AppendLine($"\t\t\tIs{c.TypeName}Changed = true;");
 				sb.AppendLine("\t\t}");
 				sb.AppendLine("\t}");
 			}
@@ -659,6 +754,7 @@ namespace RobloxCSharp.Extensions.Entities
 					sb.AppendLine($"{indent}_ctx._Register{c.TypeName}{suffix}(this, new{f.Name});");
 				}
 			});
+			if (c.IsWatched) sb.AppendLine($"\t\tIs{c.TypeName}Changed = true;");
 			sb.AppendLine("\t\treturn component;");
 			sb.AppendLine("\t}");
 
@@ -687,6 +783,7 @@ namespace RobloxCSharp.Extensions.Entities
 					sb.AppendLine($"{indent}_ctx._Register{c.TypeName}{suffix}(this, new{f.Name});");
 				}
 			});
+			if (c.IsWatched) sb.AppendLine($"\t\tIs{c.TypeName}Changed = true;");
 			sb.AppendLine("\t\treturn component;");
 			sb.AppendLine("\t}");
 
@@ -1215,6 +1312,82 @@ namespace RobloxCSharp.Extensions.Entities
 			sb.AppendLine("\t}");
 			sb.AppendLine($"\tinternal void _Clear{c.TypeName}Entity() {{ {field} = null; }}");
 			sb.AppendLine("}");
+		}
+
+		private static string LowerFirst(string s)
+			=> string.IsNullOrEmpty(s) ? s : char.ToLowerInvariant(s[0]) + s.Substring(1);
+	}
+
+	// Emits a tiny C# class file for the synthesized {Name}Changed flag
+	// of a [Watched] component. No attributes — the codegen synthesizes
+	// the matching ComponentModel directly and never re-discovers this
+	// class via attribute scan. The class only needs to exist so user
+	// code can reference the type (`entity.Is{Name}Changed`) and so the
+	// flag's static-singleton instantiation compiles.
+	internal static class WatchedFlagClassTemplate
+	{
+		public static string Emit(ComponentModel source)
+		{
+			StringBuilder sb = new();
+			sb.AppendLine("// <auto-generated/> roblox-csharp-entities");
+			sb.AppendLine("using Entities;");
+			sb.AppendLine();
+			if (!string.IsNullOrEmpty(source.NamespaceName))
+			{
+				sb.AppendLine($"namespace {source.NamespaceName}");
+				sb.AppendLine("{");
+				sb.AppendLine($"\tpublic class {source.TypeName}Changed : IComponent {{ }}");
+				sb.AppendLine("}");
+			}
+			else
+			{
+				sb.AppendLine($"public class {source.TypeName}Changed : IComponent {{ }}");
+			}
+			return sb.ToString();
+		}
+	}
+
+	// Emits a per-context cleanup system that clears every Changed flag
+	// at end of frame. User adds it to the tail of their feature
+	// pipeline so reactive systems consuming `*Changed` see one-frame
+	// signals. One system per context; one loop per [Watched] component.
+	internal static class WatchedCleanupSystemTemplate
+	{
+		public static string Emit(ContextModel ctx, List<ComponentModel> watchedSources)
+		{
+			string entityType = $"{ctx.Name}Entity";
+
+			StringBuilder sb = new();
+			sb.AppendLine("// <auto-generated/> roblox-csharp-entities");
+			sb.AppendLine("using Entities;");
+			sb.AppendLine();
+			sb.AppendLine($"public sealed class {ctx.Name}WatchedCleanupSystem : ICleanupSystem");
+			sb.AppendLine("{");
+			foreach (ComponentModel c in watchedSources)
+			{
+				sb.AppendLine($"\tprivate readonly IGroup<{entityType}> _{LowerFirst(c.TypeName)}Changed;");
+			}
+			sb.AppendLine();
+			sb.AppendLine($"\tpublic {ctx.Name}WatchedCleanupSystem({ctx.Name}Context context)");
+			sb.AppendLine("\t{");
+			foreach (ComponentModel c in watchedSources)
+			{
+				sb.AppendLine($"\t\t_{LowerFirst(c.TypeName)}Changed = context.GetGroup({ctx.Name}Matcher");
+				sb.AppendLine("\t\t\t.AllOf(");
+				sb.AppendLine($"\t\t\t\t{ctx.Name}Matcher.{c.TypeName}Changed));");
+			}
+			sb.AppendLine("\t}");
+			sb.AppendLine();
+			sb.AppendLine("\tpublic void Cleanup()");
+			sb.AppendLine("\t{");
+			foreach (ComponentModel c in watchedSources)
+			{
+				sb.AppendLine($"\t\tforeach ({entityType} e in _{LowerFirst(c.TypeName)}Changed.GetEntities())");
+				sb.AppendLine($"\t\t\te.Is{c.TypeName}Changed = false;");
+			}
+			sb.AppendLine("\t}");
+			sb.AppendLine("}");
+			return sb.ToString();
 		}
 
 		private static string LowerFirst(string s)

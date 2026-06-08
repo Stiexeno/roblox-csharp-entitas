@@ -1176,5 +1176,160 @@ namespace G {
 			Assert.True(healthIdx < baseIdx, "RemoveHealth must precede base.Destroy.");
 			Assert.True(sessionIdx < baseIdx, "IsGameSession = false must precede base.Destroy.");
 		}
+
+		// ----------------------------------------------------------------
+		// [Watched] — class-level. Codegen synthesizes a {Name}Changed
+		// flag component in the same context + namespace, patches
+		// state-mutating entity bodies (AddX / ReplaceX / unwrap setter,
+		// flag flip either direction) to set `Is{Name}Changed = true`,
+		// and emits a {Ctx}WatchedCleanupSystem the user adds to the
+		// tail of their feature pipeline.
+		// ----------------------------------------------------------------
+
+		private const string OneWatchedValue = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game, Watched] public class Health : IComponent { public int Value; } }";
+
+		private const string OneWatchedFlag = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game, Watched] public class Stunned : IComponent { } }";
+
+		[Fact]
+		public void Watched_EmitsChangedFlagClass()
+		{
+			TestHarness.Project p = Run(nameof(Watched_EmitsChangedFlagClass), OneWatchedValue);
+			Assert.True(TestHarness.GeneratedExists(p, "Watched/HealthChanged.cs"));
+			string changedClass = TestHarness.ReadGenerated(p, "Watched/HealthChanged.cs");
+			Assert.Contains("namespace G", changedClass);
+			Assert.Contains("public class HealthChanged : IComponent { }", changedClass);
+		}
+
+		[Fact]
+		public void Watched_ChangedFlagAppearsInComponentsLookup()
+		{
+			TestHarness.Project p = Run(nameof(Watched_ChangedFlagAppearsInComponentsLookup), OneWatchedValue);
+			string lookup = TestHarness.ReadGenerated(p, "GameComponentsLookup.cs");
+			Assert.Contains("public const int HealthChanged", lookup);
+			Assert.Contains("typeof(HealthChanged)", lookup);
+		}
+
+		[Fact]
+		public void Watched_EntityHasIsChangedFlagSetter()
+		{
+			TestHarness.Project p = Run(nameof(Watched_EntityHasIsChangedFlagSetter), OneWatchedValue);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.HealthChanged.cs");
+			Assert.Contains("public bool IsHealthChanged", comp);
+		}
+
+		[Fact]
+		public void Watched_ValueAdd_SetsChangedFlag()
+		{
+			TestHarness.Project p = Run(nameof(Watched_ValueAdd_SetsChangedFlag), OneWatchedValue);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			// The AddX body should end with `IsHealthChanged = true;` before the return.
+			int addIdx = comp.IndexOf("public global::G.Health AddHealth(", StringComparison.Ordinal);
+			int returnIdx = comp.IndexOf("return component;", addIdx, StringComparison.Ordinal);
+			string addBody = comp.Substring(addIdx, returnIdx - addIdx);
+			Assert.Contains("IsHealthChanged = true;", addBody);
+		}
+
+		[Fact]
+		public void Watched_ValueReplace_SetsChangedFlag()
+		{
+			TestHarness.Project p = Run(nameof(Watched_ValueReplace_SetsChangedFlag), OneWatchedValue);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			int replaceIdx = comp.IndexOf("public global::G.Health ReplaceHealth(", StringComparison.Ordinal);
+			int returnIdx = comp.IndexOf("return component;", replaceIdx, StringComparison.Ordinal);
+			string replaceBody = comp.Substring(replaceIdx, returnIdx - replaceIdx);
+			Assert.Contains("IsHealthChanged = true;", replaceBody);
+		}
+
+		[Fact]
+		public void Watched_ValueUnwrapSetter_SetsChangedFlag()
+		{
+			// `entity.Health = 7` setter path — same Changed signal as
+			// ReplaceHealth.
+			TestHarness.Project p = Run(nameof(Watched_ValueUnwrapSetter_SetsChangedFlag), OneWatchedValue);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			// The setter block holds the unwrap; the Changed write lives at the end.
+			int setterIdx = comp.IndexOf("set", StringComparison.Ordinal);
+			int closeIdx = comp.IndexOf("\t\t}", setterIdx, StringComparison.Ordinal);
+			string setterBody = comp.Substring(setterIdx, closeIdx - setterIdx);
+			Assert.Contains("IsHealthChanged = true;", setterBody);
+		}
+
+		[Fact]
+		public void Watched_ValueRemove_DoesNotSetChangedFlag()
+		{
+			// RemoveX deliberately doesn't set Changed — the entity no
+			// longer has the component, so a Changed matcher couldn't
+			// observe it anyway.
+			TestHarness.Project p = Run(nameof(Watched_ValueRemove_DoesNotSetChangedFlag), OneWatchedValue);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			int removeIdx = comp.IndexOf("public void RemoveHealth()", StringComparison.Ordinal);
+			int braceClose = comp.IndexOf("\n\t}", removeIdx, StringComparison.Ordinal);
+			string removeBody = comp.Substring(removeIdx, braceClose - removeIdx);
+			Assert.DoesNotContain("IsHealthChanged = true;", removeBody);
+		}
+
+		[Fact]
+		public void Watched_FlagSetter_BothDirectionsSetChangedFlag()
+		{
+			// Flag flip is a change in either direction — both true and
+			// false branches raise Changed.
+			TestHarness.Project p = Run(nameof(Watched_FlagSetter_BothDirectionsSetChangedFlag), OneWatchedFlag);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Stunned.cs");
+			// Count occurrences of the Changed write in the setter — once
+			// per branch (true / false).
+			int hits = System.Text.RegularExpressions.Regex.Matches(
+				comp, @"IsStunnedChanged = true;").Count;
+			Assert.True(hits >= 2, $"Expected `IsStunnedChanged = true;` in both true/false branches, found {hits}.");
+		}
+
+		[Fact]
+		public void Watched_CleanupSystem_Emitted()
+		{
+			TestHarness.Project p = Run(nameof(Watched_CleanupSystem_Emitted), OneWatchedValue);
+			Assert.True(TestHarness.GeneratedExists(p, "GameWatchedCleanupSystem.cs"));
+			string cleanup = TestHarness.ReadGenerated(p, "GameWatchedCleanupSystem.cs");
+			Assert.Contains("public sealed class GameWatchedCleanupSystem : ICleanupSystem", cleanup);
+			Assert.Contains("public void Cleanup()", cleanup);
+			Assert.Contains("e.IsHealthChanged = false;", cleanup);
+		}
+
+		[Fact]
+		public void Watched_CleanupSystem_NotEmittedWhenNoWatchedComponents()
+		{
+			TestHarness.Project p = Run(nameof(Watched_CleanupSystem_NotEmittedWhenNoWatchedComponents), OneGameHealth);
+			Assert.False(TestHarness.GeneratedExists(p, "GameWatchedCleanupSystem.cs"));
+		}
+
+		[Fact]
+		public void Watched_CleanupSystem_OneLoopPerWatchedComponent()
+		{
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G {
+	[Game, Watched] public class Health : IComponent { public int Value; }
+	[Game, Watched] public class Stunned : IComponent { }
+	[Game]          public class Plain : IComponent { public int Value; }
+}";
+			TestHarness.Project p = Run(nameof(Watched_CleanupSystem_OneLoopPerWatchedComponent), source);
+			string cleanup = TestHarness.ReadGenerated(p, "GameWatchedCleanupSystem.cs");
+			Assert.Contains("e.IsHealthChanged = false;", cleanup);
+			Assert.Contains("e.IsStunnedChanged = false;", cleanup);
+			Assert.DoesNotContain("IsPlainChanged", cleanup);
+		}
+
+		[Fact]
+		public void Watched_NonWatchedComponent_DoesNotSetChanged()
+		{
+			TestHarness.Project p = Run(nameof(Watched_NonWatchedComponent_DoesNotSetChanged), OneGameHealth);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			Assert.DoesNotContain("IsHealthChanged", comp);
+		}
 	}
 }
