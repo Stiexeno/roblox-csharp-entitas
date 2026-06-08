@@ -1,6 +1,6 @@
 #pragma warning disable CS0626 // Methods are implemented in runtime/Matcher.luau, not in this assembly.
 
-namespace Entitas
+namespace Entities
 {
 	// IDE type-checking surface — runtime/Matcher.luau is the real impl.
 	// The fluent-builder shape is preserved through the I*Matcher interface

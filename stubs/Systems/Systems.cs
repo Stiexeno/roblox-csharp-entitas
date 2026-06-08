@@ -1,6 +1,6 @@
 #pragma warning disable CS0626 // Methods are implemented in runtime/Systems.luau, not in this assembly.
 
-namespace Entitas
+namespace Entities
 {
 	// IDE type-checking surface — runtime/Systems.luau is the real impl.
 	// Implements every system-phase interface so Add(this) self-bucketing

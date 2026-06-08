@@ -1,4 +1,4 @@
--- Entitas Group (alpha port). Holds entities matching a given matcher.
+-- Group (alpha). Holds entities matching a given matcher.
 -- Context calls HandleEntitySilently on group when it knows membership
 -- changed; the group recomputes via matcher:Matches.
 
@@ -53,7 +53,7 @@ end
 function Group:GetEntities(buffer)
 	if buffer ~= nil then
 		-- Clear-and-fill the supplied buffer (perf-sensitive callers
-		-- reuse one across frames). Matches Entitas 1.14 semantics.
+		-- reuse one across frames).
 		for i = #buffer, 1, -1 do buffer[i] = nil end
 		for e, _ in pairs(self._entities) do
 			table.insert(buffer, e)

@@ -13,23 +13,23 @@
 
 local RunService = game:GetService("RunService")
 
-local EntitasReplication = {}
-EntitasReplication._suppressCount = 0
-EntitasReplication._isServer = RunService:IsServer()
+local EntitiesReplication = {}
+EntitiesReplication._suppressCount = 0
+EntitiesReplication._isServer = RunService:IsServer()
 
-function EntitasReplication.ShouldEmit()
-	return EntitasReplication._isServer and EntitasReplication._suppressCount == 0
+function EntitiesReplication.ShouldEmit()
+	return EntitiesReplication._isServer and EntitiesReplication._suppressCount == 0
 end
 
-function EntitasReplication.BeginSuppress()
-	EntitasReplication._suppressCount = EntitasReplication._suppressCount + 1
+function EntitiesReplication.BeginSuppress()
+	EntitiesReplication._suppressCount = EntitiesReplication._suppressCount + 1
 end
 
-function EntitasReplication.EndSuppress()
-	EntitasReplication._suppressCount = EntitasReplication._suppressCount - 1
-	if EntitasReplication._suppressCount < 0 then
-		error("EntitasReplication.EndSuppress called more times than BeginSuppress.")
+function EntitiesReplication.EndSuppress()
+	EntitiesReplication._suppressCount = EntitiesReplication._suppressCount - 1
+	if EntitiesReplication._suppressCount < 0 then
+		error("EntitiesReplication.EndSuppress called more times than BeginSuppress.")
 	end
 end
 
-return EntitasReplication
+return EntitiesReplication

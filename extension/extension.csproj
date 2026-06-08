@@ -21,7 +21,7 @@
 
 	<!--
 		Project references assume roblox-csharp is cloned as a sibling
-		of roblox-csharp-entitas — the same convention every plugin uses
+		of roblox-csharp-entities — the same convention every plugin uses
 		for its IDE setup.
 	-->
 	<ItemGroup>

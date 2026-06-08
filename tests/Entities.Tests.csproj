@@ -10,7 +10,7 @@
 	<!--
 		Plugin extension source is compiled into the test assembly so we
 		test the production code, not a copy. The csproj assumes
-		roblox-csharp is cloned as a sibling of roblox-csharp-entitas —
+		roblox-csharp is cloned as a sibling of roblox-csharp-entities —
 		the same convention every plugin uses for its IDE setup.
 	-->
 	<ItemGroup>

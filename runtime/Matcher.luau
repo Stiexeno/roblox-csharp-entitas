@@ -1,4 +1,4 @@
--- Entitas Matcher (alpha port). Generic erased to a single concrete table.
+-- Matcher (alpha). Generic erased to a single concrete table.
 -- Frozen-feast pattern: `GameMatcher.AllOf(GameMatcher.A).NoneOf(GameMatcher.B)`.
 -- The chain mutates and returns self after each step.
 --

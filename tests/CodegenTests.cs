@@ -1,20 +1,20 @@
-namespace Entitas.Tests
+namespace Entities.Tests
 {
-	// Tests for EntitasExtension.PreSourceDiscovery — assert on the
+	// Tests for EntitiesExtension.PreSourceDiscovery — assert on the
 	// generated C# (src/Generated/*.cs) content shape, file presence,
 	// and the discovery rules (which IComponent classes get picked up,
 	// which contexts they route to).
 	public class CodegenTests
 	{
 		private const string OneGamePlayer = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace G { [Game] public class Player : IComponent { } }
 ";
 
 		private const string OneGameHealth = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace G { [Game] public class Health : IComponent { public int Value; } }
 ";
 
@@ -46,8 +46,8 @@ namespace G { [Game] public class Health : IComponent { public int Value; } }
 		public void Codegen_EmitsPerContextFiles_ForMultipleContexts()
 		{
 			string source = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace Ents
 {
 	public class InputAttribute : ContextAttribute { public InputAttribute() : base(""Input"") { } }
@@ -81,8 +81,8 @@ namespace Ents
 		public void Codegen_IgnoresAbstractComponents()
 		{
 			string source = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace G {
 	[Game] public abstract class Base : IComponent { }
 	[Game] public class Real : IComponent { }
@@ -98,7 +98,7 @@ namespace G {
 		public void Codegen_IgnoresUntaggedIComponentImplementers()
 		{
 			string source = @"
-using Entitas;
+using Entities;
 namespace G {
 	public class NoTag : IComponent { }   // No [Game] attribute — should be skipped.
 }";
@@ -114,8 +114,8 @@ namespace G {
 		public void ComponentsLookup_AssignsZeroBasedIndicesInSortedOrder()
 		{
 			string source = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace G {
 	[Game] public class Zebra : IComponent { }
 	[Game] public class Apple : IComponent { }
@@ -133,8 +133,8 @@ namespace G {
 		public void ComponentsLookup_TotalComponents_MatchesCount()
 		{
 			string source = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace G {
 	[Game] public class A : IComponent { }
 	[Game] public class B : IComponent { }
@@ -227,8 +227,8 @@ namespace G {
 		public void EntityValue_MultiField_DoesNotUnwrap()
 		{
 			string source = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace G { [Game] public class Pos : IComponent { public int X; public int Y; } }";
 			TestHarness.Project p = Run(nameof(EntityValue_MultiField_DoesNotUnwrap), source);
 			string entity = TestHarness.ReadGenerated(p, "Components/Game.Pos.cs");
@@ -248,8 +248,8 @@ namespace G { [Game] public class Pos : IComponent { public int X; public int Y;
 		public void EntityValue_SingleNonValueField_DoesNotUnwrap()
 		{
 			string source = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace G { [Game] public class AttackEvent : IComponent { public int AttackerId; } }";
 			TestHarness.Project p = Run(nameof(EntityValue_SingleNonValueField_DoesNotUnwrap), source);
 			string entity = TestHarness.ReadGenerated(p, "Components/Game.AttackEvent.cs");
@@ -267,8 +267,8 @@ namespace G { [Game] public class AttackEvent : IComponent { public int Attacker
 			// codegen output compiles even when the user hasn't pulled
 			// in the right `using`).
 			string source = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace Custom { public struct Vec3 { } }
 namespace G {
 	[Game] public class Position : IComponent { public Custom.Vec3 Value; }
@@ -291,9 +291,9 @@ namespace G {
 		}
 
 		[Fact]
-		public void Entity_ExtendsEntitasEntity()
+		public void Entity_ExtendsEntitiesEntity()
 		{
-			TestHarness.Project p = Run(nameof(Entity_ExtendsEntitasEntity), OneGamePlayer);
+			TestHarness.Project p = Run(nameof(Entity_ExtendsEntitiesEntity), OneGamePlayer);
 			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
 			Assert.Contains("public sealed partial class GameEntity : Entity", entity);
 		}
@@ -396,8 +396,8 @@ namespace G {
 		public void Contexts_HasOneLowerCasePropertyPerContext()
 		{
 			string source = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace Ents {
 	public class InputAttribute : ContextAttribute { public InputAttribute() : base(""Input"") { } }
 	[Game] public class A : IComponent { }
@@ -413,8 +413,8 @@ namespace Ents {
 		public void Contexts_AllContextsArray_IncludesEveryContext()
 		{
 			string source = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace Ents {
 	public class InputAttribute : ContextAttribute { public InputAttribute() : base(""Input"") { } }
 	[Game] public class A : IComponent { }
@@ -445,8 +445,8 @@ namespace Ents {
 		public void Codegen_DoesNotMixComponentsBetweenContexts()
 		{
 			string source = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace Ents {
 	public class InputAttribute : ContextAttribute { public InputAttribute() : base(""Input"") { } }
 	[Game] public class GameOnly : IComponent { }
@@ -509,15 +509,15 @@ namespace Ents {
 		// ----------------------------------------------------------------
 
 		private const string OneReplicatedHealth = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace G {
 	[Game, Replicated] public class Health : IComponent { public int Value; }
 }";
 
 		private const string OneReplicatedFlag = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 namespace G {
 	[Game, Replicated] public class Stunned : IComponent { }
 }";
@@ -618,14 +618,14 @@ namespace G {
 		[Fact]
 		public void Replication_ValueFire_IsGuardedByShouldEmit()
 		{
-			// EntitasReplication.ShouldEmit returns false on the client
+			// EntitiesReplication.ShouldEmit returns false on the client
 			// and inside server BeginSuppress scopes, so the codegen-
 			// emitted fire-calls have to be wrapped in the guard.
 			TestHarness.Project p = Run(nameof(Replication_ValueFire_IsGuardedByShouldEmit), OneReplicatedHealth);
 			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
-			Assert.Contains("if (EntitasReplication.ShouldEmit()) { GameReplication.HealthAdded?.Invoke(", entity);
-			Assert.Contains("if (EntitasReplication.ShouldEmit()) { GameReplication.HealthReplaced?.Invoke(", entity);
-			Assert.Contains("if (EntitasReplication.ShouldEmit()) { GameReplication.HealthRemoved?.Invoke(", entity);
+			Assert.Contains("if (EntitiesReplication.ShouldEmit()) { GameReplication.HealthAdded?.Invoke(", entity);
+			Assert.Contains("if (EntitiesReplication.ShouldEmit()) { GameReplication.HealthReplaced?.Invoke(", entity);
+			Assert.Contains("if (EntitiesReplication.ShouldEmit()) { GameReplication.HealthRemoved?.Invoke(", entity);
 		}
 
 		// ----------------------------------------------------------------

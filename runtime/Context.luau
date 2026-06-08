@@ -1,4 +1,4 @@
--- Entitas Context (alpha port). Parent of generated GameContext / InputContext.
+-- Context (alpha). Parent of generated GameContext / InputContext.
 -- Holds the active entity set, tracks creationIndex, lazily creates groups,
 -- broadcasts entity-component changes to interested groups, and maintains
 -- a reuse stack so destroyed entities recycle instead of churning the GC.

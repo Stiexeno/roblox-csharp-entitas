@@ -3,7 +3,7 @@
 using System.Collections;
 using System.Collections.Generic;
 
-namespace Entitas
+namespace Entities
 {
 	// IDE type-checking surface — runtime/Group.luau is the real impl.
 	public class Group<TEntity> : IGroup<TEntity> where TEntity : class, IEntity

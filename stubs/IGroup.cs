@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Entitas
+namespace Entities
 {
 	public interface IGroup
 	{
@@ -9,12 +9,11 @@ namespace Entitas
 
 	// Typed group — what `context.GetGroup(matcher)` returns. The buffer
 	// overload (`GetEntities(List<TEntity>)`) is the perf-aware variant
-	// frozen-feast uses everywhere; mirrors Entitas-1.14 verbatim.
+	// frozen-feast uses everywhere.
 	//
 	// Inherits IEnumerable<TEntity> so user code can `foreach (var e in group)`
-	// directly without `.GetEntities()` first — matches the Entitas API.
-	// The runtime's Group:__iter metamethod implements iteration on the
-	// Luau side.
+	// directly without `.GetEntities()` first. The runtime's Group:__iter
+	// metamethod implements iteration on the Luau side.
 	public interface IGroup<TEntity> : IGroup, IEnumerable<TEntity> where TEntity : class, IEntity
 	{
 		IMatcher<TEntity> matcher { get; }

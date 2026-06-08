@@ -1,6 +1,6 @@
 using System;
 
-namespace Entitas.CodeGeneration.Attributes
+namespace Entities.CodeGeneration.Attributes
 {
 	// Method-level marker. Methods carrying it on partial Contexts run
 	// after the generated constructor wires every context up. Used to

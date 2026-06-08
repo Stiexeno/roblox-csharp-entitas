@@ -1,4 +1,4 @@
-namespace Entitas
+namespace Entities
 {
 	public interface IMatcher<TEntity> where TEntity : class, IEntity
 	{

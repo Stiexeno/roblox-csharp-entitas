@@ -1,4 +1,4 @@
--- Entitas Entity (alpha port). Parent of generated GameEntity / InputEntity / etc.
+-- Entity (alpha). Parent of generated GameEntity / InputEntity / etc.
 -- Holds components in an integer-keyed table; the codegen-emitted entity
 -- extensions go through AddComponent / HasComponent / etc.
 --

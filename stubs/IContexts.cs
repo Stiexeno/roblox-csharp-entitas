@@ -1,4 +1,4 @@
-namespace Entitas
+namespace Entities
 {
 	// Codegen-emitted `Contexts` class implements this. `allContexts`
 	// powers blanket lifecycle calls (Reset everything, etc.) without the

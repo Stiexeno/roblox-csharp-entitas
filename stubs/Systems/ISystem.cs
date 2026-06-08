@@ -1,4 +1,4 @@
-namespace Entitas
+namespace Entities
 {
 	// Empty root interface; lets Feature.Add accept anything system-shaped
 	// and stash it into the right bucket (initialize / execute / cleanup

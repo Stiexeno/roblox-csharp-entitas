@@ -1,4 +1,4 @@
--- Entitas Feature (alpha port). Systems + a name string for debugging.
+-- Feature (alpha). Systems + a name string for debugging.
 -- Subclass of Systems via metatable __index.
 
 local Systems = require(script.Parent.Systems)

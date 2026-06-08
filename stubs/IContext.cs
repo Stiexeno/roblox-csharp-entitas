@@ -1,4 +1,4 @@
-namespace Entitas
+namespace Entities
 {
 	// Untyped context surface — the codegen wires every generated context
 	// behind this so `IContexts.allContexts` returns IContext[] uniformly.

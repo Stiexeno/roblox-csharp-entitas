@@ -1,6 +1,6 @@
 #pragma warning disable CS0626 // Methods are implemented in runtime/Context.luau, not in this assembly.
 
-namespace Entitas
+namespace Entities
 {
 	// IDE type-checking surface only — runtime/Context.luau is what
 	// actually runs. Generated {Ctx}Context partials extend this and

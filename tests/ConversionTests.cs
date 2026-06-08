@@ -1,4 +1,4 @@
-﻿namespace Entitas.Tests
+﻿namespace Entities.Tests
 {
 	// End-to-end pipeline tests â€” drop sample C# in src/, run codegen +
 	// transpile, then assert on the rendered Luau. Validates the
@@ -7,8 +7,8 @@
 	public class ConversionTests
 	{
 		private const string Preamble = @"
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 ";
 
 		private static Dictionary<string, string> Run(string testName, string userSource)
@@ -479,7 +479,7 @@ using Entitas.CodeGeneration.Attributes;
 
 		// ----------------------------------------------------------------
 		// Plugin imports â€” references to runtime classes resolve to the
-		// ReplicatedStorage.Plugins.Entitas path.
+		// ReplicatedStorage.Plugins.Entities path.
 		// ----------------------------------------------------------------
 
 		[Fact]
@@ -490,7 +490,7 @@ using Entitas.CodeGeneration.Attributes;
 				@"namespace U { [Game] public class Player : IComponent { } }");
 
 			string ctx = GetContext(outputs);
-			Assert.Contains("\"Plugins\", \"Entitas\", \"Context\"", ctx);
+			Assert.Contains("\"Plugins\", \"Entities\", \"Context\"", ctx);
 		}
 
 		[Fact]
@@ -501,7 +501,7 @@ using Entitas.CodeGeneration.Attributes;
 				@"namespace U { [Game] public class Player : IComponent { } }");
 
 			string entity = GetEntity(outputs);
-			Assert.Contains("\"Plugins\", \"Entitas\", \"Entity\"", entity);
+			Assert.Contains("\"Plugins\", \"Entities\", \"Entity\"", entity);
 		}
 
 		[Fact]
@@ -512,7 +512,7 @@ using Entitas.CodeGeneration.Attributes;
 				@"namespace U { [Game] public class Player : IComponent { } }");
 
 			string matcher = GetMatcher(outputs);
-			Assert.Contains("\"Plugins\", \"Entitas\", \"Matcher\"", matcher);
+			Assert.Contains("\"Plugins\", \"Entities\", \"Matcher\"", matcher);
 		}
 
 		// ----------------------------------------------------------------

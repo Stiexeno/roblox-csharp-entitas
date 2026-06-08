@@ -1,6 +1,6 @@
 using System;
 
-namespace Entitas.CodeGeneration.Attributes
+namespace Entities.CodeGeneration.Attributes
 {
 	// Generates a singleton accessor on the context: instead of
 	// `entity.AddX(value)` you get `context.SetX(value)` / `context.x`.

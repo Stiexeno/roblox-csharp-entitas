@@ -1,22 +1,22 @@
-# roblox-csharp-entitas
+# roblox-csharp-entities
 
-[Entitas](https://github.com/sschmid/Entitas)-style ECS for Roblox, packaged as a [roblox-csharp](https://github.com/Stiexeno/roblox-csharp) plugin. Write components and systems the same way you would in Unity: `[Game] class Health : IComponent`, `class FooSystem : IExecuteSystem`, `game.GetGroup(GameMatcher.AllOf(...).NoneOf(...))`. The plugin's codegen runs on every `roblox-csharp dev` tick and writes the usual `Generated/Contexts.cs` / `GameContext.cs` / `GameEntity.cs` / `GameMatcher.cs` / `GameComponentsLookup.cs` partials into `src/Generated/`, so your IDE sees `entity.isPlayer`, `entity.ReplaceHealth(...)`, etc. exactly like in a Unity Entitas project.
+ECS for Roblox, packaged as a [roblox-csharp](https://github.com/Stiexeno/roblox-csharp) plugin. Write components and systems with the familiar `[Game] class Health : IComponent`, `class FooSystem : IExecuteSystem`, `game.GetGroup(GameMatcher.AllOf(...).NoneOf(...))` shape. The plugin's codegen runs on every `roblox-csharp dev` tick and writes `Generated/Contexts.cs` / `GameContext.cs` / `GameEntity.cs` / `GameMatcher.cs` / `GameComponentsLookup.cs` partials into `src/Generated/`, so your IDE sees `entity.IsPlayer`, `entity.ReplaceHealth(...)`, etc.
 
 ## Install
 
 From your roblox-csharp project root:
 
 ```sh
-roblox-csharp plugin add Stiexeno/roblox-csharp-entitas
+roblox-csharp plugin add Stiexeno/roblox-csharp-entities
 ```
 
-That drops the plugin into `plugins/Entitas/`. Recompile (`roblox-csharp` or `roblox-csharp dev`) and the runtime mounts at `ReplicatedStorage.Plugins.Entitas`.
+That drops the plugin into `plugins/Entities/`. Recompile (`roblox-csharp` or `roblox-csharp dev`) and the runtime mounts at `ReplicatedStorage.Plugins.Entities`.
 
 ## Quick start
 
 ```csharp
-using Entitas;
-using Entitas.CodeGeneration.Attributes;
+using Entities;
+using Entities.CodeGeneration.Attributes;
 
 namespace MyGame
 {
@@ -34,28 +34,45 @@ namespace MyGame
 
         public void Execute()
         {
-            foreach (var e in _players.GetEntities())
-                e.ReplaceHealth(e.health.Value - 1);
+            foreach (var e in _players)
+                e.ReplaceHealth(e.Health - 1);
         }
     }
 }
 ```
 
-Run `roblox-csharp dev`. The plugin generates `src/Generated/Contexts.cs`, `GameContext.cs`, `GameEntity.cs` (with `isPlayer` / `AddHealth` / `ReplaceHealth` extensions), `GameMatcher.cs`, `GameComponentsLookup.cs`. The transpiler then emits Luau as normal, the runtime mounts under `ReplicatedStorage.Plugins.Entitas`, and your systems run.
+Run `roblox-csharp dev`. The plugin generates `Contexts.cs`, `GameContext.cs`, `GameEntity.cs` (with `IsPlayer` / `AddHealth` / `ReplaceHealth` extensions), `GameMatcher.cs`, `GameComponentsLookup.cs`. The transpiler emits Luau, the runtime mounts under `ReplicatedStorage.Plugins.Entities`, your systems run.
 
-## Scope
+## Multiplayer
 
-| Included                                            | Not included                          |
-| --------------------------------------------------- | ------------------------------------- |
-| `IComponent`, `Entity`, `Context`, `Group`          | `ReactiveSystem`, `Collector`         |
-| `Matcher` (AllOf / AnyOf / NoneOf), `IMatcher`      | `JobSystem` (no threads on Roblox)    |
-| `IInitializeSystem`, `IExecuteSystem`               | Blueprints, Migration tooling         |
-| `ICleanupSystem`, `ITearDownSystem`, `Systems`      | Visual Debugging (planned)            |
-| `Feature`                                           |                                       |
-| `EntityIndex`, `PrimaryEntityIndex`                 |                                       |
-| `[Game]` / `[Input]` / `[Unique]` / `[PostConstructor]` |                                   |
-| `[EntityIndex]` / `[PrimaryEntityIndex]`            |                                       |
+Tag a component with `[Replicated]` and the codegen wires it to the [networking](https://github.com/Stiexeno/roblox-csharp-networking) plugin: server-side `AddX`/`ReplaceX`/`RemoveX` fire `[NetworkEvent(Scope.ServerToClient)]` delegates, a generated `{Ctx}ClientMirror` subscribes and re-applies on the client. `EntitiesReplication.ShouldEmit()` guards against echoing the apply back over the wire.
 
 ## Status
 
-Alpha. API matches Entitas 1.14 for the included surface. Frozen-feast-style component / system source compiles verbatim.
+Alpha.
+
+### Shipped
+
+- `IComponent`, `Entity`, `Context`, `Group`, `Matcher` (AllOf / AnyOf / NoneOf chain)
+- System lifecycle: `IInitializeSystem`, `IExecuteSystem`, `ICleanupSystem`, `ITearDownSystem`, `Systems`, `Feature`
+- Codegen for `[Game]`, `[Input]`, custom `ContextAttribute` subclasses — emits per-context `Context` / `Entity` / `Matcher` / `ComponentsLookup` partials, one file per component
+- Flag vs single-`Value` vs multi-field components — each emits the right `IsX` / property+setter / property-only shape
+- Entity pool — `Destroy` recycles into `Context._reusableEntities`, next `CreateEntity` pops + `Reactivate`s
+- Component pool — `AddX`/`ReplaceX`/setter route through `CreateComponent<T>(index)`; `Context.ClearComponentPool(index)` / `ClearComponentPools()` drain the stacks
+- `[Replicated]` codegen — per-context `Replication.cs` + `ClientMirror.cs`; `EntitiesReplication.BeginSuppress/EndSuppress` for nested suppress scopes
+- Direct `foreach (var e in group)` via `IGroup<T>:__iter` (no `.GetEntities()` needed)
+
+### Left to do
+
+- `[Unique]` codegen — attribute stub ships but no `context.SetX` / `context.x` accessor wired
+- `[PostConstructor]` codegen — attribute stub ships but no post-ctor invocation wired
+- `[EntityIndex]` / `[PrimaryEntityIndex]` — neither attribute nor codegen yet
+- Property-shaped value components (`public int Value { get; set; }`) — codegen ignores property-backed fields; only plain public fields are picked up
+- Replication: `serverTick` is a placeholder (always 0); real tick + client prediction is a follow-up
+- Visual debugger
+
+### Won't be added
+
+- `ReactiveSystem` / `Collector` — group iteration covers what I need
+- `JobSystem` — no threads on Roblox
+- Blueprints, migration tooling

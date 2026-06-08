@@ -1,8 +1,7 @@
-namespace Entitas
+namespace Entities
 {
-	// Public Entitas-1.14 surface. Alpha runtime drops AERC retain /
-	// release and event delegates; component pools land in a separate
-	// commit. Entity pool is wired here.
+	// Alpha runtime drops AERC retain / release and event delegates;
+	// component pools land in a separate commit. Entity pool is wired here.
 	public interface IEntity
 	{
 		int totalComponents { get; }

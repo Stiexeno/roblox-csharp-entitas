@@ -8,9 +8,9 @@ using RobloxCSharp.Rojo;
 using RobloxCSharp.Transformer;
 using RobloxCSharp.Transformer.AST;
 using RobloxCSharp.Transformer.Extensibility;
-using RobloxCSharp.Extensions.Entitas;
+using RobloxCSharp.Extensions.Entities;
 
-namespace Entitas.Tests
+namespace Entities.Tests
 {
 	// Per-test temp directory + helpers. PreSourceDiscovery does disk
 	// IO (Generated/*.cs are real files), so the tests need a real
@@ -19,7 +19,7 @@ namespace Entitas.Tests
 	internal static class TestHarness
 	{
 		private static readonly string FixturesRoot =
-			Path.Combine(Path.GetTempPath(), "RobloxCSharpEntitasTests");
+			Path.Combine(Path.GetTempPath(), "RobloxCSharpEntitiesTests");
 
 		// Locate the plugin root by walking up from the test assembly.
 		// The plugin's manifest.json sits next to stubs/ and runtime/ at
@@ -35,7 +35,7 @@ namespace Entitas.Tests
 				dir = Directory.GetParent(dir)?.FullName;
 			}
 			throw new InvalidOperationException(
-				"Could not locate roblox-csharp-entitas plugin root from " + AppContext.BaseDirectory);
+				"Could not locate roblox-csharp-entities plugin root from " + AppContext.BaseDirectory);
 		});
 
 		public static string PluginRoot => _pluginRoot.Value;
@@ -77,10 +77,10 @@ namespace Entitas.Tests
 			};
 			File.WriteAllText(Path.Combine(root, "default.project.json"), projectFile.ToJsonString());
 
-			// Mount the Entitas plugin into the temp project — copy the
+			// Mount the Entities plugin into the temp project — copy the
 			// manifest + stubs so PluginLoader sees a real plugin layout.
 			// Runtime is optional for codegen-only tests; copy it lazily.
-			string pluginDest = Path.Combine(root, "plugins", "Entitas");
+			string pluginDest = Path.Combine(root, "plugins", "Entities");
 			Directory.CreateDirectory(Path.Combine(pluginDest, "stubs"));
 			File.Copy(
 				Path.Combine(PluginRoot, "manifest.json"),
@@ -109,7 +109,7 @@ namespace Entitas.Tests
 			p.Plugins = PluginLoader.Discover(p.Root);
 			p.Diagnostics = new DiagnosticBag();
 
-			EntitasExtension extension = new();
+			EntitiesExtension extension = new();
 			extension.PreSourceDiscovery(p.SrcDir, p.Plugins, p.Diagnostics);
 		}
 
@@ -130,7 +130,7 @@ namespace Entitas.Tests
 			PathTranslator translator = new(p.SrcDir, p.OutDir);
 
 			CSharpCompiler compiler = new();
-			CompileResult result = compiler.CompileProject(sources, p.Plugins, projectRoot: p.SrcDir, rootNamespace: "EntitasTest");
+			CompileResult result = compiler.CompileProject(sources, p.Plugins, projectRoot: p.SrcDir, rootNamespace: "EntitiesTest");
 
 			LuaRenderer renderer = new();
 			Dictionary<string, string> outputs = new(StringComparer.OrdinalIgnoreCase);

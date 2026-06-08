@@ -1,6 +1,6 @@
 #pragma warning disable CS0626 // Methods are implemented in runtime/Entity.luau, not in this assembly.
 
-namespace Entitas
+namespace Entities
 {
 	// IDE type-checking surface only. Every member is `extern` to make the
 	// "implemented elsewhere" intent explicit — the actual code lives in

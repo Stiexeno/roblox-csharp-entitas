@@ -1,6 +1,6 @@
 using System;
 
-namespace Entitas.CodeGeneration.Attributes
+namespace Entities.CodeGeneration.Attributes
 {
 	// Base marker for context-assignment attributes. Subclass per context
 	// name ([Game], [Input], [Inventory], …) and apply to IComponent

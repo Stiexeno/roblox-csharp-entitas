@@ -1,4 +1,4 @@
-namespace Entitas
+namespace Entities
 {
 	// Runs once when Systems.Initialize() fires. The conventional spot
 	// for one-shot setup that depends on the whole context graph being

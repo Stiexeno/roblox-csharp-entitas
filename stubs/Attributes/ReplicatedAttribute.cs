@@ -1,6 +1,6 @@
 using System;
 
-namespace Entitas.CodeGeneration.Attributes
+namespace Entities.CodeGeneration.Attributes
 {
 	// Marks a component as server→client replicated. When the codegen
 	// emits the entity's AddX / ReplaceX / RemoveX for a replicated

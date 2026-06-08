@@ -1,4 +1,4 @@
--- Entitas Systems runner (alpha port). Add() buckets each system into the
+-- Systems runner (alpha). Add() buckets each system into the
 -- phase lists it implements (cast in C# / duck-typed here). Initialize /
 -- Execute / Cleanup / TearDown walk their bucket in insertion order.
 

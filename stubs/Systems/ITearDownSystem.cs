@@ -1,4 +1,4 @@
-namespace Entitas
+namespace Entities
 {
 	// Runs once when Systems.TearDown() fires. The mirror of
 	// IInitializeSystem: cleanup that must happen before the context
