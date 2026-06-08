@@ -10,21 +10,28 @@ The roblox-csharp transpiler covers most of C# but has gaps and Roblox-specific 
 
 ## Language features — what lowers, what doesn't
 
-- **`async` / `await`** — `AwaitExpressionTransformer` unwraps `await foo()` to `foo()` (the call runs synchronously in Luau). The `async` keyword on the method signature is a no-op on lowering. True coroutine wrapping (per the renderer's TODO list) isn't done yet — so `await` is structural compatibility, not actual asynchrony. If you need real concurrency, use Roblox's `task.spawn(fn)` / `task.delay(seconds, fn)` / `task.wait(seconds)`.
-- **`out` parameters in method declarations** — work fine. The converter's own sample (`RobloxCSharp.Tests/.../Kitchen.cs`) uses `Calculate(ref int a, out int b, in int c, params int[] values)`.
-- **`out var` at a call site** — **uncertain, needs verification before relying on it**. There's no explicit `DeclarationExpressionSyntax` handler in the transformer. Roslyn may pass it through as a regular argument-with-declaration, but the codegen-emitted entity bodies in this repo deliberately use `ContainsKey + indexer` instead (see `ClientReplicationTemplate` in the entities plugin) — so the safer pattern is:
-  ```csharp
-  // SAFE
-  if (dict.ContainsKey(key)) {
-      TValue value = dict[key];
-      // ...
-  }
+Each entry below has a probe test pinning the behavior in `tests/TranspilerProbeTests.cs` — run them if you upgrade the converter to catch regressions or new support.
 
-  // POSSIBLY OK — test in your project first
-  if (dict.TryGetValue(key, out int v)) { ... }
+### ✅ Works
+
+- **`async` / `await`** — `AwaitExpressionTransformer` unwraps `await foo()` to `foo()`. The `async` keyword on the method signature is a no-op on lowering. True coroutine wrapping (per the renderer's TODO list) isn't done yet, so `await` is structural compatibility — the call runs synchronously in Luau. If you need real concurrency, use Roblox's `task.spawn(fn)` / `task.delay(seconds, fn)` / `task.wait(seconds)`.
+- **`out` parameters in method declarations** — `int Calculate(ref int a, out int b, in int c, params int[] values)` compiles fine. Confirmed in `RobloxCSharp.Tests/.../Kitchen.cs`.
+- **Pattern matching with `is X y`** — `IsPatternExpressionTransformer` handles `DeclarationPatternSyntax` and binds the variable via `AddPrerequisite(LocalDeclaration(...))`. So `if (obj is int i) { use(i); }` works.
+- **Tuple deconstruction in declarations** — `(int a, int b) = method();` works; both locals are bound.
+
+### ❌ Doesn't lower
+
+- **`out var v` / `out int v` at a call site** — `DeclarationExpressionSyntax` has no transformer. The transpiler emits a literal `--[[ NotImplemented: DeclarationExpressionSyntax ]]` comment in the argument position and any subsequent reference to `v` is a phantom local. Use `ContainsKey + indexer` instead:
+  ```csharp
+  // BAD — emits NotImplemented + undefined `v` reference
+  if (dict.TryGetValue(key, out int v)) { use(v); }
+
+  // GOOD
+  if (dict.ContainsKey(key)) {
+      int v = dict[key];
+      use(v);
+  }
   ```
-- **Pattern matching with `is X y`** — likely the same `DeclarationExpressionSyntax` story. Use explicit cast + null check until verified.
-- **Tuple deconstruction in declarations** — avoid `(int a, int b) = method()`. Use named struct returns or two calls.
 
 ## Numeric / indexing
 
