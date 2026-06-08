@@ -22,7 +22,7 @@ namespace RobloxCSharp.Extensions.Entities
 			string field = $"_{LowerFirst(c.TypeName)}Entity";
 			string entityProp = $"{LowerFirst(c.TypeName)}Entity";
 
-			sb.AppendLine($"public sealed partial class {ctx.Name}Context");
+			sb.AppendLine($"public sealed partial class {ctx.Name}Context : I{ctx.Name}{c.TypeName}ContextHooks");
 			sb.AppendLine("{");
 			sb.AppendLine($"\tprivate {entityType} {field};");
 			sb.AppendLine($"\tpublic {entityType} {entityProp} {{ get {{ return {field}; }} }}");
@@ -105,19 +105,21 @@ namespace RobloxCSharp.Extensions.Entities
 				sb.AppendLine("\t}");
 			}
 
-			// Internal hooks — invoked by codegen-emitted entity bodies so
-			// that user code mutating via the entity API stays in sync.
-			// `_Set` throws on conflicting holder to match Entitas's
-			// "one entity at a time" guarantee.
-			sb.AppendLine($"\tinternal void _Set{c.TypeName}Entity({entityType} entity)");
+			// Hooks — invoked by codegen-emitted entity bodies via the
+			// I{Ctx}{Comp}ContextHooks interface (IEntity-typed parameter)
+			// so the entity-side cast site doesn't have to import the
+			// concrete {Ctx}Context type. Body casts IEntity → {Ctx}Entity
+			// internally.
+			sb.AppendLine($"\tpublic void _Set{c.TypeName}Entity(IEntity entity)");
 			sb.AppendLine("\t{");
-			sb.AppendLine($"\t\tif ({field} != null && {field} != entity)");
+			sb.AppendLine($"\t\t{entityType} typed = ({entityType})entity;");
+			sb.AppendLine($"\t\tif ({field} != null && {field} != typed)");
 			sb.AppendLine("\t\t{");
 			sb.AppendLine($"\t\t\tthrow new System.Exception(\"Unique component {c.TypeName} is already assigned to a different entity.\");");
 			sb.AppendLine("\t\t}");
-			sb.AppendLine($"\t\t{field} = entity;");
+			sb.AppendLine($"\t\t{field} = typed;");
 			sb.AppendLine("\t}");
-			sb.AppendLine($"\tinternal void _Clear{c.TypeName}Entity() {{ {field} = null; }}");
+			sb.AppendLine($"\tpublic void _Clear{c.TypeName}Entity() {{ {field} = null; }}");
 			sb.AppendLine("}");
 		}
 

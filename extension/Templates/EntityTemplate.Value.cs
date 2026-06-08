@@ -54,7 +54,7 @@ namespace RobloxCSharp.Extensions.Entities
 			{
 				if (!HasContextHooks()) return;
 				sb.AppendLine($"{indent}{{");
-				sb.AppendLine($"{indent}\t{ctx.Name}Context _ctx = ({ctx.Name}Context)context;");
+				sb.AppendLine($"{indent}\tI{ctx.Name}{c.TypeName}ContextHooks _ctx = context as I{ctx.Name}{c.TypeName}ContextHooks;");
 				sb.AppendLine($"{indent}\tif (_ctx != null)");
 				sb.AppendLine($"{indent}\t{{");
 				body($"{indent}\t\t");

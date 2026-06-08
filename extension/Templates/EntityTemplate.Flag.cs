@@ -30,10 +30,10 @@ namespace RobloxCSharp.Extensions.Entities
 				? $" if (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueRemove(\"{ctx.Name}\", {lookup}, creationIndex);"
 				: "";
 			string uniqueSet = c.IsUnique
-				? $" {{ {ctx.Name}Context _ctx = ({ctx.Name}Context)context; if (_ctx != null) _ctx._Set{c.TypeName}Entity(this); }}"
+				? $" {{ I{ctx.Name}{c.TypeName}ContextHooks _ctx = context as I{ctx.Name}{c.TypeName}ContextHooks; if (_ctx != null) _ctx._Set{c.TypeName}Entity(this); }}"
 				: "";
 			string uniqueClear = c.IsUnique
-				? $" {{ {ctx.Name}Context _ctx = ({ctx.Name}Context)context; if (_ctx != null) _ctx._Clear{c.TypeName}Entity(); }}"
+				? $" {{ I{ctx.Name}{c.TypeName}ContextHooks _ctx = context as I{ctx.Name}{c.TypeName}ContextHooks; if (_ctx != null) _ctx._Clear{c.TypeName}Entity(); }}"
 				: "";
 			string watchedFlag = c.IsWatched
 				? $" Is{c.TypeName}Changed = true;"
