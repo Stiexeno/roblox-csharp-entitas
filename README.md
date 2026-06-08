@@ -45,7 +45,9 @@ Run `roblox-csharp dev`. The plugin generates `Contexts.cs`, `GameContext.cs`, `
 
 ## Multiplayer
 
-Tag a component with `[Replicated]` and the codegen wires it to the [networking](https://github.com/Stiexeno/roblox-csharp-networking) plugin: server-side `AddX`/`ReplaceX`/`RemoveX` fire `[NetworkEvent(Scope.ServerToClient)]` delegates, a generated `{Ctx}ClientMirror` subscribes and re-applies on the client. `EntitiesReplication.ShouldEmit()` guards against echoing the apply back over the wire.
+Tag a component with `[Replicated]` and the codegen enqueues a Set / Remove op on the server every time `AddX` / `ReplaceX` / `RemoveX` mutates it. One `RemoteEvent` per context lives at `ReplicatedStorage.Plugins.Entities.<Context>Replication`; the runtime drains every context's buffer on `RunService.Heartbeat` and fires once per tick with the whole batch — far cheaper than fanning out per-component delegates and gives you cross-component ordering for free. A generated `{Ctx}ClientReplication` subscribes once and dispatches by `componentIndex` onto the local mirror entity, picking `AddX` vs `ReplaceX` by `HasX` so server re-sends (late join, re-sync) stay idempotent.
+
+The wire is hand-rolled — no networking plugin dependency.
 
 ## Status
 
@@ -68,7 +70,7 @@ Alpha.
 - `[PostConstructor]` codegen — attribute stub ships but no post-ctor invocation wired
 - `[EntityIndex]` / `[PrimaryEntityIndex]` — neither attribute nor codegen yet
 - Property-shaped value components (`public int Value { get; set; }`) — codegen ignores property-backed fields; only plain public fields are picked up
-- Replication: `serverTick` is a placeholder (always 0); real tick + client prediction is a follow-up
+- Replication: no `serverTick` on the wire yet; client prediction + reconciliation is a follow-up
 - Visual debugger
 
 ### Won't be added

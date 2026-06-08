@@ -503,9 +503,11 @@ namespace Ents {
 		}
 
 		// ----------------------------------------------------------------
-		// Replication codegen — [Replicated] components emit per-context
-		// Replication.cs with [NetworkEvent(Scope.ServerToClient)] delegate
-		// fields, and the entity's Add/Replace/Remove bodies fire them.
+		// Replication codegen — [Replicated] components enqueue Set / Remove
+		// ops on the per-context EntitiesReplication buffer. The server runtime
+		// drains the buffer on RunService.Heartbeat and fires one RemoteEvent
+		// per context per tick with the whole batch. No per-context static
+		// delegate class is emitted anymore.
 		// ----------------------------------------------------------------
 
 		private const string OneReplicatedHealth = @"
@@ -523,185 +525,185 @@ namespace G {
 }";
 
 		[Fact]
-		public void Replication_EmitsContextReplicationFile_WhenComponentIsReplicated()
+		public void Replication_DoesNotEmitStaticDelegateFile()
 		{
-			TestHarness.Project p = Run(nameof(Replication_EmitsContextReplicationFile_WhenComponentIsReplicated), OneReplicatedHealth);
-			Assert.True(TestHarness.GeneratedExists(p, "GameReplication.cs"));
-		}
-
-		[Fact]
-		public void Replication_DoesNotEmitFile_WhenNoComponentIsReplicated()
-		{
-			TestHarness.Project p = Run(nameof(Replication_DoesNotEmitFile_WhenNoComponentIsReplicated), OneGameHealth);
+			// The per-component {Ctx}Replication.cs static-delegate class
+			// was removed when the wire collapsed to a single per-context
+			// RemoteEvent. Replication is runtime-driven now.
+			TestHarness.Project p = Run(nameof(Replication_DoesNotEmitStaticDelegateFile), OneReplicatedHealth);
 			Assert.False(TestHarness.GeneratedExists(p, "GameReplication.cs"));
 		}
 
 		[Fact]
-		public void Replication_ValueComponent_EmitsAddReplacedRemovedAsNetworkEvents()
+		public void Replication_ValueAddX_BodyEnqueuesSet()
 		{
-			TestHarness.Project p = Run(nameof(Replication_ValueComponent_EmitsAddReplacedRemovedAsNetworkEvents), OneReplicatedHealth);
-			string repl = TestHarness.ReadGenerated(p, "GameReplication.cs");
-
-			Assert.Contains("using Networking;", repl);
-			Assert.Contains("public static class GameReplication", repl);
-			Assert.Contains("[NetworkEvent(Scope.ServerToClient)] public static Action<int, int, ushort> HealthAdded;", repl);
-			Assert.Contains("[NetworkEvent(Scope.ServerToClient)] public static Action<int, int, ushort> HealthReplaced;", repl);
-			Assert.Contains("[NetworkEvent(Scope.ServerToClient)] public static Action<int, ushort> HealthRemoved;", repl);
-		}
-
-		[Fact]
-		public void Replication_FlagComponent_EmitsAddedRemovedButNotReplaced()
-		{
-			// Flags are binary — Add fires when toggled true, Remove fires
-			// when toggled false. There's no Replaced (the singleton
-			// instance never changes).
-			TestHarness.Project p = Run(nameof(Replication_FlagComponent_EmitsAddedRemovedButNotReplaced), OneReplicatedFlag);
-			string repl = TestHarness.ReadGenerated(p, "GameReplication.cs");
-
-			Assert.Contains("public static Action<int, ushort> StunnedAdded;", repl);
-			Assert.Contains("public static Action<int, ushort> StunnedRemoved;", repl);
-			Assert.DoesNotContain("StunnedReplaced", repl);
-		}
-
-		[Fact]
-		public void Replication_ValueAddX_BodyFiresAddedEvent()
-		{
-			TestHarness.Project p = Run(nameof(Replication_ValueAddX_BodyFiresAddedEvent), OneReplicatedHealth);
+			// Set covers Added + Replaced — wire op shape doesn't distinguish.
+			// Client picks AddX vs ReplaceX by HasX on dispatch.
+			TestHarness.Project p = Run(nameof(Replication_ValueAddX_BodyEnqueuesSet), OneReplicatedHealth);
 			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
-			Assert.Contains("GameReplication.HealthAdded?.Invoke(creationIndex, newValue, 0);", entity);
+			Assert.Contains("EntitiesReplication.QueueSet(\"Game\", GameComponentsLookup.Health, creationIndex, newValue);", entity);
 		}
 
 		[Fact]
-		public void Replication_ValueReplaceX_BodyFiresReplacedEvent()
+		public void Replication_ValueReplaceX_BodyEnqueuesSet()
 		{
-			TestHarness.Project p = Run(nameof(Replication_ValueReplaceX_BodyFiresReplacedEvent), OneReplicatedHealth);
+			TestHarness.Project p = Run(nameof(Replication_ValueReplaceX_BodyEnqueuesSet), OneReplicatedHealth);
 			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
-			Assert.Contains("GameReplication.HealthReplaced?.Invoke(creationIndex, newValue, 0);", entity);
+			int hits = System.Text.RegularExpressions.Regex.Matches(
+				entity, @"EntitiesReplication\.QueueSet\(""Game"", GameComponentsLookup\.Health, creationIndex, newValue\);").Count;
+			Assert.True(hits >= 2, $"Expected QueueSet in both Add and Replace bodies, found {hits}.");
 		}
 
 		[Fact]
-		public void Replication_ValueSetter_FiresReplacedEvent()
+		public void Replication_ValueSetter_EnqueuesSet()
 		{
-			TestHarness.Project p = Run(nameof(Replication_ValueSetter_FiresReplacedEvent), OneReplicatedHealth);
+			TestHarness.Project p = Run(nameof(Replication_ValueSetter_EnqueuesSet), OneReplicatedHealth);
 			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
-			Assert.Contains("GameReplication.HealthReplaced?.Invoke(creationIndex, value, 0);", entity);
+			Assert.Contains("EntitiesReplication.QueueSet(\"Game\", GameComponentsLookup.Health, creationIndex, value);", entity);
 		}
 
 		[Fact]
-		public void Replication_RemoveX_BodyFiresRemovedEvent()
+		public void Replication_RemoveX_BodyEnqueuesRemove()
 		{
-			TestHarness.Project p = Run(nameof(Replication_RemoveX_BodyFiresRemovedEvent), OneReplicatedHealth);
+			TestHarness.Project p = Run(nameof(Replication_RemoveX_BodyEnqueuesRemove), OneReplicatedHealth);
 			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
-			Assert.Contains("GameReplication.HealthRemoved?.Invoke(creationIndex, 0);", entity);
+			Assert.Contains("EntitiesReplication.QueueRemove(\"Game\", GameComponentsLookup.Health, creationIndex);", entity);
 		}
 
 		[Fact]
-		public void Replication_FlagSetter_FiresAddedOrRemovedDependingOnValue()
+		public void Replication_FlagSetter_EnqueuesSetOrRemoveByValue()
 		{
-			TestHarness.Project p = Run(nameof(Replication_FlagSetter_FiresAddedOrRemovedDependingOnValue), OneReplicatedFlag);
+			TestHarness.Project p = Run(nameof(Replication_FlagSetter_EnqueuesSetOrRemoveByValue), OneReplicatedFlag);
 			string entity = TestHarness.ReadGenerated(p, "Components/Game.Stunned.cs");
-			Assert.Contains("GameReplication.StunnedAdded?.Invoke(creationIndex, 0);", entity);
-			Assert.Contains("GameReplication.StunnedRemoved?.Invoke(creationIndex, 0);", entity);
+			Assert.Contains("EntitiesReplication.QueueSet(\"Game\", GameComponentsLookup.Stunned, creationIndex);", entity);
+			Assert.Contains("EntitiesReplication.QueueRemove(\"Game\", GameComponentsLookup.Stunned, creationIndex);", entity);
 		}
 
 		[Fact]
-		public void NonReplicated_AddX_DoesNotFireAnyEvent()
+		public void NonReplicated_AddX_DoesNotEnqueueAnything()
 		{
-			// Regression: only [Replicated] components get the fire-call
+			// Regression: only [Replicated] components get the enqueue
 			// injection. Plain components stay untouched.
-			TestHarness.Project p = Run(nameof(NonReplicated_AddX_DoesNotFireAnyEvent), OneGameHealth);
+			TestHarness.Project p = Run(nameof(NonReplicated_AddX_DoesNotEnqueueAnything), OneGameHealth);
 			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
-			Assert.DoesNotContain("Replication.", entity);
-			Assert.DoesNotContain("?.Invoke(", entity);
+			Assert.DoesNotContain("EntitiesReplication.Queue", entity);
 		}
 
 		[Fact]
-		public void Replication_ValueFire_IsGuardedByShouldEmit()
+		public void Replication_Enqueue_IsGuardedByShouldEmit()
 		{
-			// EntitiesReplication.ShouldEmit returns false on the client
-			// and inside server BeginSuppress scopes, so the codegen-
-			// emitted fire-calls have to be wrapped in the guard.
-			TestHarness.Project p = Run(nameof(Replication_ValueFire_IsGuardedByShouldEmit), OneReplicatedHealth);
+			// ShouldEmit returns false on the client and inside server
+			// BeginSuppress scopes, so the codegen-emitted enqueues have to
+			// be wrapped in the guard.
+			TestHarness.Project p = Run(nameof(Replication_Enqueue_IsGuardedByShouldEmit), OneReplicatedHealth);
 			string entity = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
-			Assert.Contains("if (EntitiesReplication.ShouldEmit()) { GameReplication.HealthAdded?.Invoke(", entity);
-			Assert.Contains("if (EntitiesReplication.ShouldEmit()) { GameReplication.HealthReplaced?.Invoke(", entity);
-			Assert.Contains("if (EntitiesReplication.ShouldEmit()) { GameReplication.HealthRemoved?.Invoke(", entity);
+			Assert.Contains("if (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueSet(", entity);
+			Assert.Contains("if (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueRemove(", entity);
 		}
 
 		// ----------------------------------------------------------------
-		// Client mirror codegen — Generated/{Ctx}ClientMirror.cs
+		// Client replication codegen — Generated/{Ctx}ClientReplication.cs
+		// subscribes once per context to the runtime RemoteEvent and
+		// dispatches received ops onto the local mirror entity.
 		// ----------------------------------------------------------------
 
 		[Fact]
-		public void ClientMirror_EmittedWhenContextHasReplicatedComponent()
+		public void ClientReplication_EmittedWhenContextHasReplicatedComponent()
 		{
-			TestHarness.Project p = Run(nameof(ClientMirror_EmittedWhenContextHasReplicatedComponent), OneReplicatedHealth);
-			Assert.True(TestHarness.GeneratedExists(p, "GameClientMirror.cs"));
+			TestHarness.Project p = Run(nameof(ClientReplication_EmittedWhenContextHasReplicatedComponent), OneReplicatedHealth);
+			Assert.True(TestHarness.GeneratedExists(p, "GameClientReplication.cs"));
 		}
 
 		[Fact]
-		public void ClientMirror_NotEmittedWhenNoReplicatedComponents()
+		public void ClientReplication_NotEmittedWhenNoReplicatedComponents()
 		{
-			TestHarness.Project p = Run(nameof(ClientMirror_NotEmittedWhenNoReplicatedComponents), OneGameHealth);
-			Assert.False(TestHarness.GeneratedExists(p, "GameClientMirror.cs"));
+			TestHarness.Project p = Run(nameof(ClientReplication_NotEmittedWhenNoReplicatedComponents), OneGameHealth);
+			Assert.False(TestHarness.GeneratedExists(p, "GameClientReplication.cs"));
 		}
 
 		[Fact]
-		public void ClientMirror_HoldsContextAndDictionary()
+		public void ClientReplication_HoldsContextAndDictionary()
 		{
-			TestHarness.Project p = Run(nameof(ClientMirror_HoldsContextAndDictionary), OneReplicatedHealth);
-			string mirror = TestHarness.ReadGenerated(p, "GameClientMirror.cs");
+			TestHarness.Project p = Run(nameof(ClientReplication_HoldsContextAndDictionary), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
 			Assert.Contains("using System.Collections.Generic;", mirror);
-			Assert.Contains("public sealed class GameClientMirror", mirror);
+			Assert.Contains("public sealed class GameClientReplication", mirror);
 			Assert.Contains("private readonly GameContext _context;", mirror);
 			Assert.Contains("private readonly Dictionary<int, GameEntity> _byServerId = new();", mirror);
 		}
 
 		[Fact]
-		public void ClientMirror_SubscribesViaPlusEqualsInConstructor()
+		public void ClientReplication_SubscribesOnceInConstructor()
 		{
-			// `+= handler` is what the roblox-csharp-networking plugin
-			// rewrites into `RemoteEvent:OnClientEvent:Connect`. The
-			// mirror's ctor wires every replicated component's
-			// Added/Replaced/Removed.
-			TestHarness.Project p = Run(nameof(ClientMirror_SubscribesViaPlusEqualsInConstructor), OneReplicatedHealth);
-			string mirror = TestHarness.ReadGenerated(p, "GameClientMirror.cs");
-			Assert.Contains("GameReplication.HealthAdded += OnHealthAdded;", mirror);
-			Assert.Contains("GameReplication.HealthReplaced += OnHealthReplaced;", mirror);
-			Assert.Contains("GameReplication.HealthRemoved += OnHealthRemoved;", mirror);
+			// Single subscription per context — runtime fans out from one
+			// RemoteEvent. No per-component += handler from the old shape.
+			TestHarness.Project p = Run(nameof(ClientReplication_SubscribesOnceInConstructor), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
+			Assert.Contains("EntitiesReplication.Subscribe(\"Game\", OnOps);", mirror);
+			Assert.DoesNotContain("HealthAdded +=", mirror);
+			Assert.DoesNotContain("GameReplication.", mirror);
 		}
 
 		[Fact]
-		public void ClientMirror_GetOrCreate_UsesContainsKeyPattern()
+		public void ClientReplication_GetOrCreate_UsesContainsKeyPattern()
 		{
-			// `out var` doesn't lower (DeclarationExpressionSyntax gap),
-			// so the mirror uses ContainsKey + indexer instead. This
-			// asserts we don't regress back to TryGetValue.
-			TestHarness.Project p = Run(nameof(ClientMirror_GetOrCreate_UsesContainsKeyPattern), OneReplicatedHealth);
-			string mirror = TestHarness.ReadGenerated(p, "GameClientMirror.cs");
+			// `out var` doesn't lower (DeclarationExpressionSyntax gap), so
+			// the mirror uses ContainsKey + indexer instead.
+			TestHarness.Project p = Run(nameof(ClientReplication_GetOrCreate_UsesContainsKeyPattern), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
 			Assert.Contains("if (_byServerId.ContainsKey(serverId)) return _byServerId[serverId];", mirror);
 			Assert.DoesNotContain("TryGetValue", mirror);
 		}
 
 		[Fact]
-		public void ClientMirror_ValueHandlers_ApplyAddReplaceRemove()
+		public void ClientReplication_OnOps_DispatchesByOpcode()
 		{
-			TestHarness.Project p = Run(nameof(ClientMirror_ValueHandlers_ApplyAddReplaceRemove), OneReplicatedHealth);
-			string mirror = TestHarness.ReadGenerated(p, "GameClientMirror.cs");
-			Assert.Contains("GetOrCreate(serverId).AddHealth(newValue);", mirror);
-			Assert.Contains("GetOrCreate(serverId).ReplaceHealth(newValue);", mirror);
-			Assert.Contains("if (_byServerId.ContainsKey(serverId)) _byServerId[serverId].RemoveHealth();", mirror);
+			// Wire shape: object[] batch; each op is object[] with
+			// {opcode, componentIndex, entityId, ...fields}.
+			TestHarness.Project p = Run(nameof(ClientReplication_OnOps_DispatchesByOpcode), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
+			Assert.Contains("private void OnOps(object[] ops)", mirror);
+			Assert.Contains("object[] op = (object[])ops[i];", mirror);
+			Assert.Contains("int opcode = (int)op[0];", mirror);
+			Assert.Contains("if (opcode == 1) { ApplyRemove(compIndex, serverId); continue; }", mirror);
 		}
 
 		[Fact]
-		public void ClientMirror_FlagHandlers_FlipIsXProperty()
+		public void ClientReplication_ApplySet_Value_PicksReplaceOrAddByHasX()
 		{
-			TestHarness.Project p = Run(nameof(ClientMirror_FlagHandlers_FlipIsXProperty), OneReplicatedFlag);
-			string mirror = TestHarness.ReadGenerated(p, "GameClientMirror.cs");
-			Assert.Contains("GetOrCreate(serverId).IsStunned = true;", mirror);
-			Assert.Contains("if (_byServerId.ContainsKey(serverId)) _byServerId[serverId].IsStunned = false;", mirror);
-			// No Replaced for flags.
-			Assert.DoesNotContain("OnStunnedReplaced", mirror);
+			// For value components the dispatch checks HasX and routes to
+			// Replace if present, Add otherwise — makes server re-sends
+			// idempotent (late join, re-sync, etc.).
+			TestHarness.Project p = Run(nameof(ClientReplication_ApplySet_Value_PicksReplaceOrAddByHasX), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
+			Assert.Contains("if (compIndex == GameComponentsLookup.Health)", mirror);
+			Assert.Contains("if (e.HasHealth) e.ReplaceHealth((int)op[3]);", mirror);
+			Assert.Contains("else e.AddHealth((int)op[3]);", mirror);
+		}
+
+		[Fact]
+		public void ClientReplication_ApplyRemove_Value_CallsRemoveX()
+		{
+			TestHarness.Project p = Run(nameof(ClientReplication_ApplyRemove_Value_CallsRemoveX), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
+			Assert.Contains("e.RemoveHealth();", mirror);
+		}
+
+		[Fact]
+		public void ClientReplication_ApplySet_Flag_SetsIsXTrue()
+		{
+			TestHarness.Project p = Run(nameof(ClientReplication_ApplySet_Flag_SetsIsXTrue), OneReplicatedFlag);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
+			Assert.Contains("if (compIndex == GameComponentsLookup.Stunned)", mirror);
+			Assert.Contains("e.IsStunned = true;", mirror);
+		}
+
+		[Fact]
+		public void ClientReplication_ApplyRemove_Flag_SetsIsXFalse()
+		{
+			TestHarness.Project p = Run(nameof(ClientReplication_ApplyRemove_Flag_SetsIsXFalse), OneReplicatedFlag);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
+			Assert.Contains("e.IsStunned = false;", mirror);
 		}
 	}
 }
