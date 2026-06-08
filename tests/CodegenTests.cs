@@ -705,5 +705,102 @@ namespace G {
 			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
 			Assert.Contains("e.IsStunned = false;", mirror);
 		}
+
+		// ----------------------------------------------------------------
+		// Server replication codegen — Generated/{Ctx}ServerReplication.cs
+		// registers a per-context snapshotter so a late-joining player can
+		// be sent the current world on Ready ping.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void ServerReplication_EmittedWhenContextHasReplicatedComponent()
+		{
+			TestHarness.Project p = Run(nameof(ServerReplication_EmittedWhenContextHasReplicatedComponent), OneReplicatedHealth);
+			Assert.True(TestHarness.GeneratedExists(p, "GameServerReplication.cs"));
+		}
+
+		[Fact]
+		public void ServerReplication_NotEmittedWhenNoReplicatedComponents()
+		{
+			TestHarness.Project p = Run(nameof(ServerReplication_NotEmittedWhenNoReplicatedComponents), OneGameHealth);
+			Assert.False(TestHarness.GeneratedExists(p, "GameServerReplication.cs"));
+		}
+
+		[Fact]
+		public void ServerReplication_ConstructorRegistersSnapshotter()
+		{
+			TestHarness.Project p = Run(nameof(ServerReplication_ConstructorRegistersSnapshotter), OneReplicatedHealth);
+			string server = TestHarness.ReadGenerated(p, "GameServerReplication.cs");
+			Assert.Contains("public sealed class GameServerReplication", server);
+			Assert.Contains("private readonly GameContext _context;", server);
+			Assert.Contains("EntitiesReplication.RegisterSnapshotter(\"Game\", Snapshot);", server);
+		}
+
+		[Fact]
+		public void ServerReplication_Snapshot_ValueComponent_EmitsSetOpWithUnwrappedField()
+		{
+			// Single-Value field uses the entity's unwrapped accessor
+			// (e.Health), matching how the tick-time Set op carries the value.
+			TestHarness.Project p = Run(nameof(ServerReplication_Snapshot_ValueComponent_EmitsSetOpWithUnwrappedField), OneReplicatedHealth);
+			string server = TestHarness.ReadGenerated(p, "GameServerReplication.cs");
+			Assert.Contains("private object[] Snapshot()", server);
+			Assert.Contains("GameEntity[] entities = _context.GetEntities();", server);
+			Assert.Contains("if (e.HasHealth)", server);
+			Assert.Contains("ops.Add(new object[] { 0, GameComponentsLookup.Health, e.creationIndex, e.Health });", server);
+		}
+
+		[Fact]
+		public void ServerReplication_Snapshot_FlagComponent_EmitsSetOpWithoutFields()
+		{
+			TestHarness.Project p = Run(nameof(ServerReplication_Snapshot_FlagComponent_EmitsSetOpWithoutFields), OneReplicatedFlag);
+			string server = TestHarness.ReadGenerated(p, "GameServerReplication.cs");
+			Assert.Contains("if (e.IsStunned)", server);
+			Assert.Contains("ops.Add(new object[] { 0, GameComponentsLookup.Stunned, e.creationIndex });", server);
+		}
+
+		[Fact]
+		public void ServerReplication_Snapshot_MultiFieldComponent_UnpacksAllFields()
+		{
+			// Multi-field component → pull the component instance, then
+			// unpack each field positionally so the wire shape matches the
+			// tick-time Set (which uses `new{Field}` named args).
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game, Replicated] public class Pos : IComponent { public int X; public int Y; } }";
+			TestHarness.Project p = Run(nameof(ServerReplication_Snapshot_MultiFieldComponent_UnpacksAllFields), source);
+			string server = TestHarness.ReadGenerated(p, "GameServerReplication.cs");
+			Assert.Contains("if (e.HasPos)", server);
+			Assert.Contains("global::G.Pos comp = e.Pos;", server);
+			Assert.Contains("ops.Add(new object[] { 0, GameComponentsLookup.Pos, e.creationIndex, comp.X, comp.Y });", server);
+		}
+
+		[Fact]
+		public void ServerReplication_Snapshot_ReturnsArray()
+		{
+			// Returns object[] so the runtime can FireClient(player, ops)
+			// with the same shape it FireAllClients's for tick batches.
+			TestHarness.Project p = Run(nameof(ServerReplication_Snapshot_ReturnsArray), OneReplicatedHealth);
+			string server = TestHarness.ReadGenerated(p, "GameServerReplication.cs");
+			Assert.Contains("return ops.ToArray();", server);
+		}
+
+		[Fact]
+		public void ServerReplication_Snapshot_OnlyWalksReplicatedComponents()
+		{
+			// A context with one [Replicated] and one plain component —
+			// only the replicated one shows up in the snapshot body.
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G {
+	[Game, Replicated] public class Health : IComponent { public int Value; }
+	[Game]             public class Local  : IComponent { public int Value; }
+}";
+			TestHarness.Project p = Run(nameof(ServerReplication_Snapshot_OnlyWalksReplicatedComponents), source);
+			string server = TestHarness.ReadGenerated(p, "GameServerReplication.cs");
+			Assert.Contains("e.HasHealth", server);
+			Assert.DoesNotContain("e.HasLocal", server);
+		}
 	}
 }

@@ -45,9 +45,27 @@ Run `roblox-csharp dev`. The plugin generates `Contexts.cs`, `GameContext.cs`, `
 
 ## Multiplayer
 
-Tag a component with `[Replicated]` and the codegen enqueues a Set / Remove op on the server every time `AddX` / `ReplaceX` / `RemoveX` mutates it. One `RemoteEvent` per context lives at `ReplicatedStorage.Plugins.Entities.<Context>Replication`; the runtime drains every context's buffer on `RunService.Heartbeat` and fires once per tick with the whole batch — far cheaper than fanning out per-component delegates and gives you cross-component ordering for free. A generated `{Ctx}ClientReplication` subscribes once and dispatches by `componentIndex` onto the local mirror entity, picking `AddX` vs `ReplaceX` by `HasX` so server re-sends (late join, re-sync) stay idempotent.
+Tag a component with `[Replicated]` and the codegen enqueues a Set / Remove op on the server every time `AddX` / `ReplaceX` / `RemoveX` mutates it. One `RemoteEvent` per context lives at `ReplicatedStorage.Plugins.Entities.<Context>Replication`; the runtime drains every context's buffer on `RunService.Heartbeat` and fires once per tick with the whole batch — far cheaper than fanning out per-component delegates and gives you cross-component ordering for free. A generated `{Ctx}ClientReplication` subscribes once and dispatches by `componentIndex` onto the local mirror entity, picking `AddX` vs `ReplaceX` by `HasX` so server re-sends stay idempotent.
 
-The wire is hand-rolled — no networking plugin dependency.
+Wire it on boot:
+
+```csharp
+public class Bootstrap
+{
+    public void Start()
+    {
+        var contexts = new Contexts();
+        Contexts.sharedInstance = contexts;
+
+        // Server-only and client-only side-effects each — safe to construct
+        // both unconditionally; the wrong-side one is a no-op.
+        new GameServerReplication(contexts.game);
+        new GameClientReplication(contexts.game);
+    }
+}
+```
+
+Late join is handled by a shared `Ready` RemoteEvent: the client fires it once on first `Subscribe`, the server walks every registered `{Ctx}ServerReplication.Snapshot()` and `FireClient`s the resulting Set ops directly to that one player on the per-context channel. The wire is hand-rolled — no networking plugin dependency.
 
 ## Status
 
@@ -61,7 +79,7 @@ Alpha.
 - Flag vs single-`Value` vs multi-field components — each emits the right `IsX` / property+setter / property-only shape
 - Entity pool — `Destroy` recycles into `Context._reusableEntities`, next `CreateEntity` pops + `Reactivate`s
 - Component pool — `AddX`/`ReplaceX`/setter route through `CreateComponent<T>(index)`; `Context.ClearComponentPool(index)` / `ClearComponentPools()` drain the stacks
-- `[Replicated]` codegen — per-context `Replication.cs` + `ClientMirror.cs`; `EntitiesReplication.BeginSuppress/EndSuppress` for nested suppress scopes
+- `[Replicated]` codegen — per-context `ServerReplication.cs` (snapshotter for late join) + `ClientReplication.cs` (dispatcher), single per-context RemoteEvent, batched per-frame Heartbeat flush
 - Direct `foreach (var e in group)` via `IGroup<T>:__iter` (no `.GetEntities()` needed)
 
 ### Left to do

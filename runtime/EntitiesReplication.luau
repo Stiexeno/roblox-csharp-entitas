@@ -16,6 +16,15 @@
 -- componentIndex onto the local entity. BeginSuppress / EndSuppress are
 -- counter-based so nested suppress scopes compose — reserved for a future
 -- client→server flow; the current alpha is server-authoritative only.
+--
+-- Late join: a shared Ready RemoteEvent (also under Plugins.Entities)
+-- carries a client→server "I'm subscribed, send me the world" ping. The
+-- client fires it exactly once on its first Subscribe call. The server
+-- listens once on RegisterSnapshotter; on receipt it walks every
+-- registered per-context snapshotter and FireClients the resulting ops
+-- batch directly to that one player on the per-context RemoteEvent.
+-- ApplySet on the client picks Add-vs-Replace by HasX so any tick-time
+-- op that races the snapshot stays idempotent.
 
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -23,9 +32,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local EntitiesReplication = {}
 EntitiesReplication._suppressCount = 0
 EntitiesReplication._isServer = RunService:IsServer()
-EntitiesReplication._buffers = {}      -- contextName -> array of ops
-EntitiesReplication._events = {}       -- contextName -> RemoteEvent
+EntitiesReplication._buffers = {}            -- contextName -> array of ops
+EntitiesReplication._events = {}             -- contextName -> RemoteEvent
+EntitiesReplication._snapshotters = {}       -- contextName -> () -> ops array (server-only)
 EntitiesReplication._flushConnected = false
+EntitiesReplication._readyConnected = false  -- server: OnServerEvent wired
+EntitiesReplication._readyFired = false      -- client: fired once per session
 
 -- Plugins/Entities folder where every per-context RemoteEvent lives.
 -- Server lazy-creates it on first QueueSet; client lazy-waits on first
@@ -56,6 +68,23 @@ local function getOrCreateEvent(contextName)
 		local inst = parent:WaitForChild(eventName)
 		EntitiesReplication._events[contextName] = inst
 		return inst
+	end
+end
+
+-- Single shared Ready RemoteEvent. Client fires once on first Subscribe;
+-- server listens once when the first snapshotter registers.
+local function getOrCreateReadyEvent()
+	local parent = pluginsFolder()
+	if EntitiesReplication._isServer then
+		local inst = parent:FindFirstChild("Ready")
+		if inst == nil then
+			inst = Instance.new("RemoteEvent")
+			inst.Name = "Ready"
+			inst.Parent = parent
+		end
+		return inst
+	else
+		return parent:WaitForChild("Ready")
 	end
 end
 
@@ -93,6 +122,26 @@ local function ensureFlushHook()
 	EntitiesReplication._flushConnected = true
 end
 
+local function ensureReadyListener()
+	if EntitiesReplication._readyConnected then return end
+	if not EntitiesReplication._isServer then return end
+	EntitiesReplication._readyConnected = true
+	local readyEv = getOrCreateReadyEvent()
+	-- pcall the snapshotter so a buggy user fn for one context doesn't
+	-- starve the others for this player.
+	readyEv.OnServerEvent:Connect(function(player)
+		for contextName, snapshotFn in pairs(EntitiesReplication._snapshotters) do
+			local ok, ops = pcall(snapshotFn)
+			if not ok then
+				warn("EntitiesReplication: snapshotter for context '" .. contextName .. "' errored: " .. tostring(ops))
+			elseif ops ~= nil and #ops > 0 then
+				local ctxEv = getOrCreateEvent(contextName)
+				ctxEv:FireClient(player, ops)
+			end
+		end
+	end)
+end
+
 local function bufferFor(contextName)
 	local buf = EntitiesReplication._buffers[contextName]
 	if buf == nil then
@@ -122,10 +171,29 @@ end
 -- Client-side single subscription point. The codegen-emitted
 -- {Ctx}ClientReplication ctor calls this exactly once per context with a
 -- handler that loops the ops array and dispatches by componentIndex.
+-- First call also pings the server's Ready event so it can dispatch a
+-- late-join snapshot back; subsequent Subscribes don't re-ping.
 function EntitiesReplication.Subscribe(contextName, handler)
 	if EntitiesReplication._isServer then return end
 	local ev = getOrCreateEvent(contextName)
 	ev.OnClientEvent:Connect(handler)
+	if not EntitiesReplication._readyFired then
+		EntitiesReplication._readyFired = true
+		local readyEv = getOrCreateReadyEvent()
+		readyEv:FireServer()
+	end
+end
+
+-- Server-only. The codegen-emitted {Ctx}ServerReplication ctor registers
+-- a snapshotter once per context. The fn is called per joining player
+-- and should return the ops array for the whole world right now.
+function EntitiesReplication.RegisterSnapshotter(contextName, snapshot)
+	if not EntitiesReplication._isServer then return end
+	EntitiesReplication._snapshotters[contextName] = snapshot
+	-- Pre-warm the context's RemoteEvent + Ready listener so the first
+	-- joining client has somewhere to fire and somewhere to be heard.
+	getOrCreateEvent(contextName)
+	ensureReadyListener()
 end
 
 return EntitiesReplication

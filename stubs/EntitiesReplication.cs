@@ -45,6 +45,18 @@ namespace Entities
 		// Subscribe a client-side handler. Called by the codegen-emitted
 		// {Ctx}ClientReplication ctor exactly once per context. Handler
 		// signature is `(ops)` where `ops` is the array decoded above.
+		// First Subscribe on a client also fires the shared Ready event so
+		// the server can dispatch a late-join snapshot back.
 		public extern static void Subscribe(string contextName, object handler);
+
+		// Server-only. Registers a per-context callable that returns the
+		// snapshot ops array (every replicated component on every live
+		// entity, encoded with opcode 0 = Set). The codegen-emitted
+		// {Ctx}ServerReplication ctor calls this once per context. On
+		// Players.PlayerAdded the runtime listens for the new client's
+		// Ready ping; on receipt it walks every registered snapshotter and
+		// FireClients the ops directly to that one player on the
+		// per-context RemoteEvent.
+		public extern static void RegisterSnapshotter(string contextName, object snapshot);
 	}
 }
