@@ -45,6 +45,12 @@ namespace Entities
 		// Pool-aware allocator — see IEntity.CreateComponent for semantics.
 		public extern T CreateComponent<T>(int index) where T : new();
 
-		public extern void Destroy();
+		// Virtual so the codegen-emitted {Ctx}Entity can override and
+		// pre-fire RemoveX (or `IsX = false`) for every hooked component
+		// before the base teardown runs — keeping replication ops, [Unique]
+		// singleton fields, and [EntityIndex] dicts in sync when the user
+		// destroys an entity directly instead of going through UnsetX /
+		// RemoveX.
+		public virtual extern void Destroy();
 	}
 }

@@ -1,41 +1,62 @@
 -- Replication wire. Single RemoteEvent per context (lives at
--- ReplicatedStorage.Plugins.Entities.<Context>Replication), payload is an
--- array of ops, each op = {opcode, componentIndex, entityId, ...fields}.
--- Opcode 0 = Set (covers Added + Replaced; client decides AddX vs
--- ReplaceX by HasX). Opcode 1 = Remove.
+-- ReplicatedStorage.Plugins.Entities.<Context>Replication). Every fire
+-- carries a monotonic server tick + an array of ops:
+--   ev:FireAllClients(tick, ops)
+--   each op = {opcode, componentIndex, entityId, ...fields}
+--   opcode 0 = Set (covers Added + Replaced; client decides AddX vs
+--   ReplaceX by HasX). Opcode 1 = Remove.
 --
--- Server: codegen-emitted entity AddX/ReplaceX/RemoveX bodies enqueue via
--- QueueSet / QueueRemove. RunService.Heartbeat tail drains every context's
--- buffer at end of frame and fires the per-context RemoteEvent once with
--- the whole batch. One RemoteEvent fire per tick per dirty context — far
--- cheaper than fanning out per-component delegate calls.
+-- Server:
+--   • Per-context monotonic tick increments on every Heartbeat
+--     regardless of activity (so the value reflects wall-clock progress,
+--     not just dirty batches).
+--   • Codegen-emitted entity AddX/ReplaceX/RemoveX bodies enqueue via
+--     QueueSet / QueueRemove.
+--   • Heartbeat tail drains every context's buffer at end of frame and
+--     fires the per-context RemoteEvent once with the whole batch. Large
+--     batches are split into CHUNK_SIZE-op chunks so a single fire stays
+--     under Roblox's RemoteEvent payload limit; Roblox preserves per-
+--     RemoteEvent ordering across fires, so each chunk applies cleanly.
 --
--- Client: ShouldEmit is always false there, so codegen-emitted bodies
--- skip the enqueue. The codegen-emitted {Ctx}ClientReplication subscribes
--- once via Subscribe(name, handler) and dispatches received ops by
--- componentIndex onto the local entity. BeginSuppress / EndSuppress are
--- counter-based so nested suppress scopes compose — reserved for a future
--- client→server flow; the current alpha is server-authoritative only.
+-- Client:
+--   • ShouldEmit is always false, so codegen-emitted bodies skip the
+--     enqueue. The codegen-emitted {Ctx}ClientReplication subscribes once
+--     via Subscribe(name, handler); the runtime wraps the handler to
+--     track latest received tick before dispatching ops.
+--   • Latest received tick per context is exposed via GetServerTick.
+--   • BeginSuppress / EndSuppress are counter-based so nested suppress
+--     scopes compose — reserved for a future client→server flow; the
+--     current alpha is server-authoritative only.
 --
--- Late join: a shared Ready RemoteEvent (also under Plugins.Entities)
--- carries a client→server "I'm subscribed, send me the world" ping. The
--- client fires it exactly once on its first Subscribe call. The server
--- listens once on RegisterSnapshotter; on receipt it walks every
--- registered per-context snapshotter and FireClients the resulting ops
--- batch directly to that one player on the per-context RemoteEvent.
--- ApplySet on the client picks Add-vs-Replace by HasX so any tick-time
--- op that races the snapshot stays idempotent.
+-- Late join:
+--   • A shared Ready RemoteEvent (also under Plugins.Entities) carries a
+--     client→server "I'm subscribed, send me the world" ping. The client
+--     fires it exactly once on first Subscribe. The server walks every
+--     registered snapshotter and FireClients the resulting ops batch
+--     (chunked through the same path) directly to that one player on the
+--     per-context RemoteEvent, tagged with the current server tick.
+--   • ApplySet on the client picks Add-vs-Replace by HasX so any tick-
+--     time op that races the snapshot stays idempotent — and pagination
+--     plays nicely with the racing concern because order is preserved.
 
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+-- Max ops per single RemoteEvent fire. ~200 ops × ~50 bytes each keeps a
+-- chunk under ~10KB, well below Roblox's per-event soft limit. Tune if
+-- you're seeing fragmentation in profiling.
+local CHUNK_SIZE = 200
+
 local EntitiesReplication = {}
 EntitiesReplication._suppressCount = 0
 EntitiesReplication._isServer = RunService:IsServer()
-EntitiesReplication._buffers = {}            -- contextName -> array of ops
+EntitiesReplication._buffers = {}            -- contextName -> array of ops (server)
 EntitiesReplication._events = {}             -- contextName -> RemoteEvent
-EntitiesReplication._snapshotters = {}       -- contextName -> () -> ops array (server-only)
-EntitiesReplication._flushConnected = false
+EntitiesReplication._snapshotters = {}       -- contextName -> () -> ops array (server)
+EntitiesReplication._contexts = {}           -- contextName -> true (server: every context we've seen)
+EntitiesReplication._ticks = {}              -- contextName -> int (server monotonic counter)
+EntitiesReplication._serverTicks = {}        -- contextName -> int (client: highest received)
+EntitiesReplication._heartbeatConnected = false
 EntitiesReplication._readyConnected = false  -- server: OnServerEvent wired
 EntitiesReplication._readyFired = false      -- client: fired once per session
 
@@ -88,6 +109,16 @@ local function getOrCreateReadyEvent()
 	end
 end
 
+-- Track every context we've seen on the server so the Heartbeat tick can
+-- advance its counter even before a snapshotter is registered or before
+-- the first QueueSet fires.
+local function trackContext(contextName)
+	if EntitiesReplication._contexts[contextName] == nil then
+		EntitiesReplication._contexts[contextName] = true
+		EntitiesReplication._ticks[contextName] = 0
+	end
+end
+
 function EntitiesReplication.ShouldEmit()
 	return EntitiesReplication._isServer and EntitiesReplication._suppressCount == 0
 end
@@ -103,23 +134,53 @@ function EntitiesReplication.EndSuppress()
 	end
 end
 
--- Server-side flush. Drains every context's buffer; fires one
--- RemoteEvent per non-empty context with the whole batch.
-local function flushAll()
-	for contextName, buf in pairs(EntitiesReplication._buffers) do
-		if #buf > 0 then
+-- Chunk an ops array, calling `fn` with each chunk. Single-fire path
+-- short-circuits the chunking allocation. Caller-side `fn` decides the
+-- fire shape (FireAllClients for tick batches, FireClient for snapshot).
+local function chunked(ops, fn)
+	local n = #ops
+	if n <= CHUNK_SIZE then
+		fn(ops)
+		return
+	end
+	local i = 1
+	while i <= n do
+		local chunk = {}
+		local last = math.min(i + CHUNK_SIZE - 1, n)
+		for k = i, last do
+			table.insert(chunk, ops[k])
+		end
+		fn(chunk)
+		i = last + 1
+	end
+end
+
+-- Server-side per-Heartbeat: tick every tracked context, then drain any
+-- non-empty buffers. Tick advances even when nothing fired so the value
+-- reflects wall-clock progress; client only learns about ticks via the
+-- fires it actually receives, so quiet contexts leave the client's
+-- serverTick frozen — that's a feature, not a bug.
+local function heartbeatTick()
+	for contextName in pairs(EntitiesReplication._contexts) do
+		EntitiesReplication._ticks[contextName] = EntitiesReplication._ticks[contextName] + 1
+
+		local buf = EntitiesReplication._buffers[contextName]
+		if buf ~= nil and #buf > 0 then
 			local ev = getOrCreateEvent(contextName)
-			ev:FireAllClients(buf)
+			local tick = EntitiesReplication._ticks[contextName]
+			chunked(buf, function(chunk)
+				ev:FireAllClients(tick, chunk)
+			end)
 			EntitiesReplication._buffers[contextName] = {}
 		end
 	end
 end
 
-local function ensureFlushHook()
-	if EntitiesReplication._flushConnected then return end
+local function ensureHeartbeatHook()
+	if EntitiesReplication._heartbeatConnected then return end
 	if not EntitiesReplication._isServer then return end
-	RunService.Heartbeat:Connect(flushAll)
-	EntitiesReplication._flushConnected = true
+	RunService.Heartbeat:Connect(heartbeatTick)
+	EntitiesReplication._heartbeatConnected = true
 end
 
 local function ensureReadyListener()
@@ -136,7 +197,10 @@ local function ensureReadyListener()
 				warn("EntitiesReplication: snapshotter for context '" .. contextName .. "' errored: " .. tostring(ops))
 			elseif ops ~= nil and #ops > 0 then
 				local ctxEv = getOrCreateEvent(contextName)
-				ctxEv:FireClient(player, ops)
+				local tick = EntitiesReplication._ticks[contextName] or 0
+				chunked(ops, function(chunk)
+					ctxEv:FireClient(player, tick, chunk)
+				end)
 			end
 		end
 	end)
@@ -147,9 +211,10 @@ local function bufferFor(contextName)
 	if buf == nil then
 		buf = {}
 		EntitiesReplication._buffers[contextName] = buf
-		-- Pre-warm the RemoteEvent + flush hook lazily on first use.
+		-- Pre-warm the RemoteEvent + heartbeat hook lazily on first use.
 		getOrCreateEvent(contextName)
-		ensureFlushHook()
+		trackContext(contextName)
+		ensureHeartbeatHook()
 	end
 	return buf
 end
@@ -170,13 +235,20 @@ end
 
 -- Client-side single subscription point. The codegen-emitted
 -- {Ctx}ClientReplication ctor calls this exactly once per context with a
--- handler that loops the ops array and dispatches by componentIndex.
--- First call also pings the server's Ready event so it can dispatch a
--- late-join snapshot back; subsequent Subscribes don't re-ping.
+-- handler `(ops) -> nil`. We wrap to also update `_serverTicks` from the
+-- payload's tick field before dispatching the ops array. First call also
+-- pings the server's Ready event so it can dispatch a late-join snapshot
+-- back; subsequent Subscribes don't re-ping.
 function EntitiesReplication.Subscribe(contextName, handler)
 	if EntitiesReplication._isServer then return end
 	local ev = getOrCreateEvent(contextName)
-	ev.OnClientEvent:Connect(handler)
+	ev.OnClientEvent:Connect(function(tick, ops)
+		local prev = EntitiesReplication._serverTicks[contextName] or 0
+		if tick ~= nil and tick > prev then
+			EntitiesReplication._serverTicks[contextName] = tick
+		end
+		handler(ops)
+	end)
 	if not EntitiesReplication._readyFired then
 		EntitiesReplication._readyFired = true
 		local readyEv = getOrCreateReadyEvent()
@@ -190,10 +262,27 @@ end
 function EntitiesReplication.RegisterSnapshotter(contextName, snapshot)
 	if not EntitiesReplication._isServer then return end
 	EntitiesReplication._snapshotters[contextName] = snapshot
+	trackContext(contextName)
 	-- Pre-warm the context's RemoteEvent + Ready listener so the first
 	-- joining client has somewhere to fire and somewhere to be heard.
 	getOrCreateEvent(contextName)
 	ensureReadyListener()
+	-- Also wire the Heartbeat tick — even a snapshot-only context wants
+	-- its tick to advance for the wall-clock semantics.
+	ensureHeartbeatHook()
+end
+
+-- Server: current monotonic tick. Client call returns 0 (no concept of
+-- "server tick" exists locally; use GetServerTick instead).
+function EntitiesReplication.GetTick(contextName)
+	if not EntitiesReplication._isServer then return 0 end
+	return EntitiesReplication._ticks[contextName] or 0
+end
+
+-- Client: highest server tick observed so far on this context.
+function EntitiesReplication.GetServerTick(contextName)
+	if EntitiesReplication._isServer then return 0 end
+	return EntitiesReplication._serverTicks[contextName] or 0
 end
 
 return EntitiesReplication

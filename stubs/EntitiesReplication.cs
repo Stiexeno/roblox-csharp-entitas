@@ -58,5 +58,17 @@ namespace Entities
 		// FireClients the ops directly to that one player on the
 		// per-context RemoteEvent.
 		public extern static void RegisterSnapshotter(string contextName, object snapshot);
+
+		// Per-context monotonic tick. Server-side counter increments on
+		// every RunService.Heartbeat regardless of activity; every fired
+		// batch (tick + snapshot) carries the value so the client can
+		// track how far behind it is. Server: GetTick returns the current
+		// local count. Client: GetServerTick returns the highest tick
+		// received so far on that context — `serverTick - localExpected`
+		// is a usable network-distance estimate, though there's no
+		// quiet-period ping today (ticks only advance on the client when
+		// the server actually fires something).
+		public extern static int GetTick(string contextName);
+		public extern static int GetServerTick(string contextName);
 	}
 }

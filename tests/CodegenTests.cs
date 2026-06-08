@@ -1093,5 +1093,86 @@ namespace G {
 			Assert.Contains("_ctx._UnregisterScore(this, _prevValue);", comp);
 			Assert.Contains("_ctx._RegisterScore(this, value);", comp);
 		}
+
+		// ----------------------------------------------------------------
+		// Entity.Destroy override — codegen emits a per-context override
+		// that pre-fires RemoveX (or `IsX = false`) for every hooked
+		// component before the base teardown, so [Replicated] QueueRemove
+		// ops, [Unique] _Clear hooks, and [EntityIndex] _Unregister hooks
+		// all run when user code destroys an entity directly instead of
+		// going through UnsetX / RemoveX.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void EntityDestroy_OverriddenWhenContextHasReplicatedComponent()
+		{
+			TestHarness.Project p = Run(nameof(EntityDestroy_OverriddenWhenContextHasReplicatedComponent), OneReplicatedHealth);
+			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			Assert.Contains("public override void Destroy()", entity);
+			Assert.Contains("if (HasHealth) RemoveHealth();", entity);
+			Assert.Contains("base.Destroy();", entity);
+		}
+
+		[Fact]
+		public void EntityDestroy_OverriddenWhenContextHasUniqueComponent()
+		{
+			TestHarness.Project p = Run(nameof(EntityDestroy_OverriddenWhenContextHasUniqueComponent), OneUniqueValue);
+			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			Assert.Contains("public override void Destroy()", entity);
+			Assert.Contains("if (HasScore) RemoveScore();", entity);
+		}
+
+		[Fact]
+		public void EntityDestroy_OverriddenWhenContextHasIndexedComponent()
+		{
+			TestHarness.Project p = Run(nameof(EntityDestroy_OverriddenWhenContextHasIndexedComponent), OnePrimaryIndexedUser);
+			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			Assert.Contains("public override void Destroy()", entity);
+			Assert.Contains("if (HasUser) RemoveUser();", entity);
+		}
+
+		[Fact]
+		public void EntityDestroy_FlagWithHook_UsesIsXFalse()
+		{
+			// Flags don't have a RemoveX method — the cleanup is
+			// `IsX = false`, which routes through the same setter that
+			// fires the [Unique] / [Replicated] hooks for flag flips.
+			TestHarness.Project p = Run(nameof(EntityDestroy_FlagWithHook_UsesIsXFalse), OneUniqueFlag);
+			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			Assert.Contains("if (IsGameSession) IsGameSession = false;", entity);
+		}
+
+		[Fact]
+		public void EntityDestroy_NotOverriddenForHookFreeContext()
+		{
+			// Plain component with no [Replicated], no [Unique], no index —
+			// no override needed; the base partial stays empty.
+			TestHarness.Project p = Run(nameof(EntityDestroy_NotOverriddenForHookFreeContext), OneGamePlayer);
+			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			Assert.DoesNotContain("public override void Destroy()", entity);
+			Assert.Contains("public sealed partial class GameEntity : Entity { }", entity);
+		}
+
+		[Fact]
+		public void EntityDestroy_CallsBaseAfterEveryHookedRemove()
+		{
+			// Ordering matters: every per-component cleanup runs before
+			// base.Destroy() so hooks see live entity state.
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G {
+	[Game, Replicated] public class Health : IComponent { public int Value; }
+	[Game, Unique]     public class GameSession : IComponent { }
+}";
+			TestHarness.Project p = Run(nameof(EntityDestroy_CallsBaseAfterEveryHookedRemove), source);
+			string entity = TestHarness.ReadGenerated(p, "GameEntity.cs");
+			int healthIdx = entity.IndexOf("if (HasHealth) RemoveHealth();", StringComparison.Ordinal);
+			int sessionIdx = entity.IndexOf("if (IsGameSession) IsGameSession = false;", StringComparison.Ordinal);
+			int baseIdx = entity.IndexOf("base.Destroy();", StringComparison.Ordinal);
+			Assert.True(healthIdx > 0 && sessionIdx > 0 && baseIdx > 0, "All three calls must appear in the override body.");
+			Assert.True(healthIdx < baseIdx, "RemoveHealth must precede base.Destroy.");
+			Assert.True(sessionIdx < baseIdx, "IsGameSession = false must precede base.Destroy.");
+		}
 	}
 }
