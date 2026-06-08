@@ -2,51 +2,36 @@
 
 namespace Entities
 {
-	// Replication wire for [Replicated] components. Binary-packed via
-	// Roblox `buffer` — ~3-5x smaller than the per-op Lua-table wire,
-	// near-zero per-tick GC on the server-side pack path.
+	// Replication wire for [Replicated] components. The codegen-emitted
+	// AddX / ReplaceX / RemoveX tail every state mutation with a
+	// Queue{Set,Remove} call, guarded by ShouldEmit so client / suppress
+	// scopes skip the enqueue. The server runtime drains every context's
+	// buffer on RunService.Heartbeat and fires one RemoteEvent per context
+	// with the whole batch — bandwidth-friendly and ordering-stable across
+	// components, unlike a per-component fanout.
 	//
-	// Per-context flow:
-	//   • Server-side {Ctx}ServerReplication ctor calls
-	//     RegisterComponentSchema once per [Replicated] component to tell
-	//     the runtime the field types it should pack.
-	//   • Codegen-emitted entity AddX / ReplaceX / RemoveX bodies call
-	//     QueueSet / QueueRemove — same C# signature as before, but the
-	//     runtime now writes into a per-context buffer via the schema
-	//     instead of building a Lua table.
-	//   • Heartbeat drains every dirty buffer and FireAllClients's
-	//     (tick, count, buffer) on the per-context RemoteEvent.
+	// Wire shape (single RemoteEvent per context, lives at
+	// ReplicatedStorage.Plugins.Entities.<Context>Replication):
+	//   payload = array of ops, each op = {opcode, componentIndex, entityId, ...fields}
+	//   opcode 0 = Set (covers Added + Replaced; client decides AddX vs ReplaceX by HasX)
+	//   opcode 1 = Remove
 	//
-	//   • Client-side {Ctx}ClientReplication ctor calls
-	//     RegisterComponentSchema (same schema, mirrored), then registers
-	//     a typed applier + remover per component via
-	//     RegisterClientApplier / RegisterClientRemover, then calls
-	//     SubscribeClient to wire OnClientEvent + the Ready ping.
-	//   • On batch receipt the runtime unpacks per the schema and calls
-	//     applier(entityId, ...fields) / remover(entityId).
-	//
-	// Wire format per op:
-	//   1 byte  opcode (0 = Set, 1 = Remove)
-	//   1 byte  componentIndex (u8 — supports up to 256 components per
-	//           context, plenty in practice)
-	//   4 bytes entityId (i32)
-	//   N bytes packed fields (Set only; schema determines layout)
-	//
-	// Late join: shared Ready RemoteEvent (also under Plugins.Entities)
-	// — client fires once on first SubscribeClient, server walks each
-	// registered snapshotter and FireClient's the resulting buffer to
-	// that one player on the per-context channel.
+	// ShouldEmit returns:
+	//   • true  on the server, normal path
+	//   • false on the client (client-side AddX never enqueues)
+	//   • false on the server inside a BeginSuppress/EndSuppress scope —
+	//     reserved for future client→server flows; unused in the current
+	//     server-authoritative alpha.
 	public static class EntitiesReplication
 	{
 		public extern static bool ShouldEmit();
 		public extern static void BeginSuppress();
 		public extern static void EndSuppress();
 
-		// Enqueue an Add-or-Replace op. Overload set covers 0..6 fields.
-		// Each overload's `object` args lower to Luau natives via
-		// vararg dispatch (no boxing at runtime); the runtime pulls them
-		// out via select(i, ...) so there's no varargs table allocation
-		// per call.
+		// Enqueue an Add-or-Replace op. Overload set covers 0..6 fields;
+		// transpiler-side params would also work but explicit overloads
+		// keep the lowering boring and the wire types obvious. If you have
+		// a component with more than 6 public fields, extend this list.
 		public extern static void QueueSet(string contextName, int componentIndex, int entityId);
 		public extern static void QueueSet(string contextName, int componentIndex, int entityId, object v1);
 		public extern static void QueueSet(string contextName, int componentIndex, int entityId, object v1, object v2);
@@ -57,62 +42,33 @@ namespace Entities
 
 		public extern static void QueueRemove(string contextName, int componentIndex, int entityId);
 
+		// Subscribe a client-side handler. Called by the codegen-emitted
+		// {Ctx}ClientReplication ctor exactly once per context. Handler
+		// signature is `(ops)` where `ops` is the array decoded above.
+		// First Subscribe on a client also fires the shared Ready event so
+		// the server can dispatch a late-join snapshot back.
+		public extern static void Subscribe(string contextName, object handler);
+
 		// Server-only. Registers a per-context callable that returns the
-		// snapshot ops via QueueSet calls. Codegen-emitted
+		// snapshot ops array (every replicated component on every live
+		// entity, encoded with opcode 0 = Set). The codegen-emitted
 		// {Ctx}ServerReplication ctor calls this once per context. On
-		// PlayerAdded → Ready, the runtime sets snapshot mode, invokes the
-		// snapshotter (so its QueueSet calls land in the per-player snap
-		// buffer instead of the shared tick buffer), then fires the
-		// resulting buffer to that one player.
+		// Players.PlayerAdded the runtime listens for the new client's
+		// Ready ping; on receipt it walks every registered snapshotter and
+		// FireClients the ops directly to that one player on the
+		// per-context RemoteEvent.
 		public extern static void RegisterSnapshotter(string contextName, object snapshot);
 
-		// Schema registration — called by both server and client during
-		// their per-context bootstrap. fieldTypes is an array of
-		// EntitiesFieldType.X codes in declaration order. Empty/missing
-		// schema means a flag component (no fields). Server uses it to
-		// pack; client uses it to unpack before calling the applier.
-		public extern static void RegisterComponentSchema(string contextName, int componentIndex, int[] fieldTypes);
-
-		// Client-only. Per-component callables invoked by the runtime
-		// after it unpacks a Set / Remove op from a received batch. Set
-		// signature is `(int entityId, ...fields)` matching the schema;
-		// Remove signature is `(int entityId)`. The applier should pick
-		// Add-vs-Replace by HasX so repeats from snapshots or re-sends
-		// stay idempotent.
-		public extern static void RegisterClientApplier(string contextName, int componentIndex, object applier);
-		public extern static void RegisterClientRemover(string contextName, int componentIndex, object remover);
-
-		// Client-only. Wires the per-context RemoteEvent's OnClientEvent
-		// to the runtime's unpack-and-dispatch loop, and fires the Ready
-		// ping once per client session so the server snapshots back.
-		// Called by codegen-emitted {Ctx}ClientReplication ctor after
-		// every Register call so the runtime has everything wired before
-		// the first batch arrives.
-		public extern static void SubscribeClient(string contextName);
-
-		// Per-context monotonic tick. Server-side counter advances on
-		// every Heartbeat; every fired batch (tick + snapshot) carries
-		// the value. GetServerTick on the client returns the highest
-		// received — `serverTick - localExpected` is a usable
-		// network-distance estimate.
+		// Per-context monotonic tick. Server-side counter increments on
+		// every RunService.Heartbeat regardless of activity; every fired
+		// batch (tick + snapshot) carries the value so the client can
+		// track how far behind it is. Server: GetTick returns the current
+		// local count. Client: GetServerTick returns the highest tick
+		// received so far on that context — `serverTick - localExpected`
+		// is a usable network-distance estimate, though there's no
+		// quiet-period ping today (ticks only advance on the client when
+		// the server actually fires something).
 		public extern static int GetTick(string contextName);
 		public extern static int GetServerTick(string contextName);
-	}
-
-	// Field type codes used by RegisterComponentSchema. Values are wire-
-	// stable bytes; don't renumber after release without bumping a wire
-	// version. Mapped from C# field types in the codegen.
-	public static class EntitiesFieldType
-	{
-		public const int I32 = 0;     // C# int (4 bytes)
-		public const int F32 = 1;     // C# float (4 bytes)
-		public const int F64 = 2;     // C# double (8 bytes)
-		public const int Bool = 3;    // C# bool (1 byte, 0/1)
-		public const int String = 4;  // u16 length + bytes
-		public const int U8 = 5;      // C# byte (1 byte)
-		public const int U16 = 6;     // C# ushort (2 bytes)
-		public const int U32 = 7;     // C# uint (4 bytes)
-		public const int I8 = 8;      // C# sbyte (1 byte)
-		public const int I16 = 9;     // C# short (2 bytes)
 	}
 }

@@ -45,7 +45,7 @@ Run `roblox-csharp dev`. The plugin generates `Contexts.cs`, `GameContext.cs`, `
 
 ## Multiplayer
 
-Tag a component with `[Replicated]` and the codegen enqueues a Set / Remove op on the server every time `AddX` / `ReplaceX` / `RemoveX` mutates it. The op is binary-packed into a Roblox `buffer` per the registered schema — `1 byte opcode + 1 byte componentIndex + 4 byte entityId + fields`. One `RemoteEvent` per context lives at `ReplicatedStorage.Plugins.Entities.<Context>Replication`; the runtime drains every context's buffer on `RunService.Heartbeat` and fires once per tick with `(serverTick, count, buffer)`. ~3–5× smaller than the old Lua-table wire, near-zero per-tick GC on the server pack path, cross-component ordering preserved by single-RemoteEvent semantics. A generated `{Ctx}ClientReplication` registers typed `Apply{X}` / `Remove{X}` callbacks; the runtime unpacks each received op per schema and calls them, picking `AddX` vs `ReplaceX` by `HasX` so server re-sends stay idempotent.
+Tag a component with `[Replicated]` and the codegen enqueues a Set / Remove op on the server every time `AddX` / `ReplaceX` / `RemoveX` mutates it. One `RemoteEvent` per context lives at `ReplicatedStorage.Plugins.Entities.<Context>Replication`; the runtime drains every context's buffer on `RunService.Heartbeat` and fires once per tick with the batch + a monotonic `serverTick` — far cheaper than fanning out per-component delegates and gives you cross-component ordering for free. Large batches split into ~200-op chunks so a single fire stays under Roblox's RemoteEvent payload limit. A generated `{Ctx}ClientReplication` subscribes once and dispatches by `componentIndex` onto the local mirror entity, picking `AddX` vs `ReplaceX` by `HasX` so server re-sends stay idempotent.
 
 `EntitiesReplication.GetServerTick("Game")` returns the highest tick the client has received; `EntitiesReplication.GetTick("Game")` is the server-side counter. The gap is a usable network-distance estimate.
 
@@ -81,7 +81,7 @@ Alpha.
 - Flag vs single-`Value` vs multi-field components — each emits the right `IsX` / property+setter / property-only shape
 - Entity pool — `Destroy` recycles into `Context._reusableEntities`, next `CreateEntity` pops + `Reactivate`s
 - Component pool — `AddX`/`ReplaceX`/setter route through `CreateComponent<T>(index)`; `Context.ClearComponentPool(index)` / `ClearComponentPools()` drain the stacks
-- `[Replicated]` codegen — per-context `ServerReplication.cs` (snapshotter + schema registration) + `ClientReplication.cs` (typed appliers + schema mirror), single per-context RemoteEvent, binary-packed Roblox `buffer` wire, batched per-frame Heartbeat flush with monotonic `serverTick`
+- `[Replicated]` codegen — per-context `ServerReplication.cs` (snapshotter for late join) + `ClientReplication.cs` (dispatcher), single per-context RemoteEvent, batched per-frame Heartbeat flush with monotonic `serverTick`, ~200-op chunking for payload-limit safety
 - `[Unique]` codegen — context-level singleton accessors (`isPlayer` / `playerEntity` / `SetPlayer()` / `UnsetPlayer()`) with auto-track through entity AddX / RemoveX hooks; conflicting assignment throws
 - `[PostConstructor]` — methods on `partial class Contexts` carrying the attribute are called at the tail of the generated `Contexts()` ctor
 - `[EntityIndex]` / `[PrimaryEntityIndex]` — field-level. Primary emits `Dictionary<TKey, {Ctx}Entity>` + `GetEntityWith{Component}(TKey)`; non-primary emits `Dictionary<TKey, HashSet<{Ctx}Entity>>` + `GetEntitiesWith{Component}(TKey)`. Entity AddX / ReplaceX / RemoveX / setter bodies tail-update the dict
@@ -93,6 +93,7 @@ Alpha.
 - Property-shaped value components (`public int Value { get; set; }`) — codegen ignores property-backed fields; only plain public fields are picked up
 - Client prediction + reconciliation — `serverTick` is on the wire now; the rest of the prediction stack (speculative state, rollback) isn't
 - Snapshot delta compression — pagination handles payload size, but every Ready ping still sends the full world. A "what's changed since last seen" pass would cut bandwidth on reconnect
+- Buffer-typed wire — built and reverted: the wire is intentionally Lua-table-shaped (`{opcode, componentIndex, entityId, ...fields}`) so components can carry `Vector3`, `Color3`, `Instance` refs, `CFrame`, and arbitrary custom objects without per-type pack/unpack code. Binary `buffer` packing is the obvious optimization if profiling ever shows the wire is a bottleneck, but it forces a closed type system (every field type needs a schema entry + read/write helper) which loses Roblox's native marshaling for free. Worth ~3–5× bandwidth + zero-alloc server pack when you actually need it; for personal-scale Roblox games the table wire is fine
 - Visual debugger
 - Group lifecycle hooks (`OnEntityAdded` / `OnEntityRemoved`) — useful for reactive systems if/when that pattern lands
 
