@@ -80,16 +80,17 @@ Alpha.
 - Entity pool — `Destroy` recycles into `Context._reusableEntities`, next `CreateEntity` pops + `Reactivate`s
 - Component pool — `AddX`/`ReplaceX`/setter route through `CreateComponent<T>(index)`; `Context.ClearComponentPool(index)` / `ClearComponentPools()` drain the stacks
 - `[Replicated]` codegen — per-context `ServerReplication.cs` (snapshotter for late join) + `ClientReplication.cs` (dispatcher), single per-context RemoteEvent, batched per-frame Heartbeat flush
+- `[Unique]` codegen — context-level singleton accessors (`isPlayer` / `playerEntity` / `SetPlayer()` / `UnsetPlayer()`) with auto-track through entity AddX / RemoveX hooks; conflicting assignment throws
+- `[PostConstructor]` — methods on `partial class Contexts` carrying the attribute are called at the tail of the generated `Contexts()` ctor
+- `[EntityIndex]` / `[PrimaryEntityIndex]` — field-level. Primary emits `Dictionary<TKey, {Ctx}Entity>` + `GetEntityWith{Component}(TKey)`; non-primary emits `Dictionary<TKey, HashSet<{Ctx}Entity>>` + `GetEntitiesWith{Component}(TKey)`. Entity AddX / ReplaceX / RemoveX / setter bodies tail-update the dict
 - Direct `foreach (var e in group)` via `IGroup<T>:__iter` (no `.GetEntities()` needed)
 
 ### Left to do
 
-- `[Unique]` codegen — attribute stub ships but no `context.SetX` / `context.x` accessor wired
-- `[PostConstructor]` codegen — attribute stub ships but no post-ctor invocation wired
-- `[EntityIndex]` / `[PrimaryEntityIndex]` — neither attribute nor codegen yet
 - Property-shaped value components (`public int Value { get; set; }`) — codegen ignores property-backed fields; only plain public fields are picked up
 - Replication: no `serverTick` on the wire yet; client prediction + reconciliation is a follow-up
 - Visual debugger
+- Group lifecycle hooks (`OnEntityAdded` / `OnEntityRemoved`) — useful for reactive systems if/when that pattern lands
 
 ### Won't be added
 

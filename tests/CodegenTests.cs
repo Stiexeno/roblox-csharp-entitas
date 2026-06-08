@@ -802,5 +802,296 @@ namespace G {
 			Assert.Contains("e.HasHealth", server);
 			Assert.DoesNotContain("e.HasLocal", server);
 		}
+
+		// ----------------------------------------------------------------
+		// [Unique] — codegen emits singleton accessors on {Ctx}Context and
+		// wires the entity's AddX / ReplaceX / RemoveX / setter to tail-update
+		// the singleton field through internal _Set/_Clear hooks. Per-component
+		// blocks land in the same Components/{Ctx}.{Component}.cs file.
+		// ----------------------------------------------------------------
+
+		private const string OneUniqueFlag = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game, Unique] public class GameSession : IComponent { } }";
+
+		private const string OneUniqueValue = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game, Unique] public class Score : IComponent { public int Value; } }";
+
+		[Fact]
+		public void Unique_Flag_ContextHasEntityFieldAndAccessors()
+		{
+			TestHarness.Project p = Run(nameof(Unique_Flag_ContextHasEntityFieldAndAccessors), OneUniqueFlag);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.GameSession.cs");
+			Assert.Contains("public sealed partial class GameContext", comp);
+			Assert.Contains("private GameEntity _gameSessionEntity;", comp);
+			Assert.Contains("public GameEntity gameSessionEntity", comp);
+			Assert.Contains("public bool isGameSession", comp);
+		}
+
+		[Fact]
+		public void Unique_Flag_SetCreatesEntityAndTogglesFlag()
+		{
+			TestHarness.Project p = Run(nameof(Unique_Flag_SetCreatesEntityAndTogglesFlag), OneUniqueFlag);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.GameSession.cs");
+			Assert.Contains("public GameEntity SetGameSession()", comp);
+			Assert.Contains("if (_gameSessionEntity == null) _gameSessionEntity = CreateEntity();", comp);
+			Assert.Contains("_gameSessionEntity.IsGameSession = true;", comp);
+		}
+
+		[Fact]
+		public void Unique_Flag_UnsetDestroysEntityAndNullsField()
+		{
+			TestHarness.Project p = Run(nameof(Unique_Flag_UnsetDestroysEntityAndNullsField), OneUniqueFlag);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.GameSession.cs");
+			Assert.Contains("public void UnsetGameSession()", comp);
+			Assert.Contains("_gameSessionEntity.Destroy();", comp);
+			Assert.Contains("_gameSessionEntity = null;", comp);
+		}
+
+		[Fact]
+		public void Unique_Flag_HooksThrowOnConflictingEntity()
+		{
+			// Two entities trying to hold the same Unique component should
+			// surface immediately — matches Entitas's "one entity at a time"
+			// guarantee. The hook compares incoming entity to the tracked
+			// one and throws on mismatch.
+			TestHarness.Project p = Run(nameof(Unique_Flag_HooksThrowOnConflictingEntity), OneUniqueFlag);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.GameSession.cs");
+			Assert.Contains("internal void _SetGameSessionEntity(GameEntity entity)", comp);
+			Assert.Contains("throw new System.Exception(\"Unique component GameSession is already assigned to a different entity.\");", comp);
+			Assert.Contains("internal void _ClearGameSessionEntity()", comp);
+		}
+
+		[Fact]
+		public void Unique_Flag_EntitySetter_TailUpdatesContextField()
+		{
+			// User code calling `entity.IsGameSession = true` must keep
+			// _gameSessionEntity in sync — the setter tail-calls
+			// _SetGameSessionEntity(this) after AddComponent.
+			TestHarness.Project p = Run(nameof(Unique_Flag_EntitySetter_TailUpdatesContextField), OneUniqueFlag);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.GameSession.cs");
+			Assert.Contains("(GameContext)context)._SetGameSessionEntity(this);", comp);
+			Assert.Contains("(GameContext)context)._ClearGameSessionEntity();", comp);
+		}
+
+		[Fact]
+		public void Unique_Value_ContextExposesUnwrappedValueAccessor()
+		{
+			TestHarness.Project p = Run(nameof(Unique_Value_ContextExposesUnwrappedValueAccessor), OneUniqueValue);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Score.cs");
+			// Single-Value field unwraps — `Score` returns the int, not the component.
+			Assert.Contains("public int Score", comp);
+			Assert.Contains("return _scoreEntity != null ? _scoreEntity.Score : default(int);", comp);
+		}
+
+		[Fact]
+		public void Unique_Value_SetAddsOrReplacesOnSingletonEntity()
+		{
+			TestHarness.Project p = Run(nameof(Unique_Value_SetAddsOrReplacesOnSingletonEntity), OneUniqueValue);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Score.cs");
+			Assert.Contains("public GameEntity SetScore(int newValue)", comp);
+			Assert.Contains("_scoreEntity.AddScore(newValue);", comp);
+			Assert.Contains("_scoreEntity.ReplaceScore(newValue);", comp);
+		}
+
+		[Fact]
+		public void Unique_Value_EntityAddReplaceRemove_TailUpdateContextField()
+		{
+			TestHarness.Project p = Run(nameof(Unique_Value_EntityAddReplaceRemove_TailUpdateContextField), OneUniqueValue);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Score.cs");
+			int setHits = System.Text.RegularExpressions.Regex.Matches(
+				comp, @"\(GameContext\)context\)\._SetScoreEntity\(this\);").Count;
+			Assert.True(setHits >= 3, $"Expected _SetScoreEntity in Add + Replace + setter, found {setHits}.");
+			Assert.Contains("(GameContext)context)._ClearScoreEntity();", comp);
+		}
+
+		[Fact]
+		public void Unique_NotEmittedWhenComponentIsNotUnique()
+		{
+			// Plain (non-[Unique]) components don't get the context partial.
+			TestHarness.Project p = Run(nameof(Unique_NotEmittedWhenComponentIsNotUnique), OneGamePlayer);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Player.cs");
+			Assert.DoesNotContain("partial class GameContext", comp);
+			Assert.DoesNotContain("_playerEntity", comp);
+		}
+
+		// ----------------------------------------------------------------
+		// [PostConstructor] — methods on `partial class Contexts` tagged
+		// with the attribute are called at the tail of the generated
+		// `Contexts()` ctor. Typical use is registering entity indices
+		// after every per-context field is wired.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void PostConstructor_MethodIsCalledAtTailOfContextsCtor()
+		{
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game] public class Player : IComponent { } }
+public partial class Contexts {
+	[PostConstructor]
+	public void InitializeEntityIndices() { }
+}";
+			TestHarness.Project p = Run(nameof(PostConstructor_MethodIsCalledAtTailOfContextsCtor), source);
+			string contexts = TestHarness.ReadGenerated(p, "Contexts.cs");
+			Assert.Contains("public Contexts()", contexts);
+			Assert.Contains("InitializeEntityIndices();", contexts);
+			// Ordering: PostConstructor calls land AFTER every per-context
+			// `<name> = new <Name>Context();` line.
+			int gameAssignIdx = contexts.IndexOf("game = new GameContext();", StringComparison.Ordinal);
+			int postIdx = contexts.IndexOf("InitializeEntityIndices();", StringComparison.Ordinal);
+			Assert.True(gameAssignIdx > 0 && postIdx > gameAssignIdx, "PostConstructor call must follow context field init.");
+		}
+
+		[Fact]
+		public void PostConstructor_MultipleMethodsAllCalled()
+		{
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game] public class Player : IComponent { } }
+public partial class Contexts {
+	[PostConstructor] public void StepA() { }
+	[PostConstructor] public void StepB() { }
+}";
+			TestHarness.Project p = Run(nameof(PostConstructor_MultipleMethodsAllCalled), source);
+			string contexts = TestHarness.ReadGenerated(p, "Contexts.cs");
+			Assert.Contains("StepA();", contexts);
+			Assert.Contains("StepB();", contexts);
+		}
+
+		[Fact]
+		public void PostConstructor_NoMethods_NoExtraCalls()
+		{
+			TestHarness.Project p = Run(nameof(PostConstructor_NoMethods_NoExtraCalls), OneGamePlayer);
+			string contexts = TestHarness.ReadGenerated(p, "Contexts.cs");
+			Assert.Contains("game = new GameContext();", contexts);
+			Assert.DoesNotContain("Initialize", contexts);
+		}
+
+		// ----------------------------------------------------------------
+		// [EntityIndex] / [PrimaryEntityIndex] — field-level. Codegen emits
+		// a per-index dict + lookup on the {Ctx}Context partial; entity's
+		// AddX / ReplaceX / RemoveX / setter bodies tail-update via
+		// _Register / _Unregister hooks.
+		// ----------------------------------------------------------------
+
+		private const string OnePrimaryIndexedUser = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G {
+	[Game] public class User : IComponent {
+		[PrimaryEntityIndex] public string UserId;
+	}
+}";
+
+		private const string OneIndexedOwned = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G {
+	[Game] public class Owned : IComponent {
+		[EntityIndex] public int OwnerId;
+	}
+}";
+
+		[Fact]
+		public void PrimaryIndex_ContextHasDictAndLookupMethod()
+		{
+			TestHarness.Project p = Run(nameof(PrimaryIndex_ContextHasDictAndLookupMethod), OnePrimaryIndexedUser);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.User.cs");
+			Assert.Contains("public sealed partial class GameContext", comp);
+			Assert.Contains("private System.Collections.Generic.Dictionary<string, GameEntity> _userByUserId = new();", comp);
+			Assert.Contains("public GameEntity GetEntityWithUser(string key)", comp);
+		}
+
+		[Fact]
+		public void PrimaryIndex_RegisterThrowsOnDuplicateKey()
+		{
+			TestHarness.Project p = Run(nameof(PrimaryIndex_RegisterThrowsOnDuplicateKey), OnePrimaryIndexedUser);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.User.cs");
+			Assert.Contains("internal void _RegisterUser(GameEntity entity, string key)", comp);
+			Assert.Contains("throw new System.Exception(\"PrimaryEntityIndex collision on User.UserId for key: \" + key);", comp);
+		}
+
+		[Fact]
+		public void PrimaryIndex_EntityAdd_RegistersKey()
+		{
+			TestHarness.Project p = Run(nameof(PrimaryIndex_EntityAdd_RegistersKey), OnePrimaryIndexedUser);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.User.cs");
+			Assert.Contains("(GameContext)context)._RegisterUser(this, newUserId);", comp);
+		}
+
+		[Fact]
+		public void PrimaryIndex_EntityReplace_UnregistersOldThenRegistersNew()
+		{
+			TestHarness.Project p = Run(nameof(PrimaryIndex_EntityReplace_UnregistersOldThenRegistersNew), OnePrimaryIndexedUser);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.User.cs");
+			// Pre-replace capture so we can unregister the prior key.
+			Assert.Contains("string _prevUserId = HasUser ? User.UserId : default(string);", comp);
+			Assert.Contains("bool _hadUser = HasUser;", comp);
+			Assert.Contains("if (_hadUser) _ctx._UnregisterUser(this, _prevUserId);", comp);
+			Assert.Contains("_ctx._RegisterUser(this, newUserId);", comp);
+		}
+
+		[Fact]
+		public void PrimaryIndex_EntityRemove_UnregistersKey()
+		{
+			TestHarness.Project p = Run(nameof(PrimaryIndex_EntityRemove_UnregistersKey), OnePrimaryIndexedUser);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.User.cs");
+			Assert.Contains("string _prevUserId = HasUser ? User.UserId : default(string);", comp);
+			Assert.Contains("_ctx._UnregisterUser(this, _prevUserId);", comp);
+		}
+
+		[Fact]
+		public void EntityIndex_NonPrimary_ContextHasHashSetDictAndPluralLookup()
+		{
+			TestHarness.Project p = Run(nameof(EntityIndex_NonPrimary_ContextHasHashSetDictAndPluralLookup), OneIndexedOwned);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Owned.cs");
+			Assert.Contains("System.Collections.Generic.Dictionary<int, System.Collections.Generic.HashSet<GameEntity>>", comp);
+			Assert.Contains("public System.Collections.Generic.IEnumerable<GameEntity> GetEntitiesWithOwned(int key)", comp);
+		}
+
+		[Fact]
+		public void EntityIndex_NonPrimary_RegisterAppendsToSet()
+		{
+			TestHarness.Project p = Run(nameof(EntityIndex_NonPrimary_RegisterAppendsToSet), OneIndexedOwned);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Owned.cs");
+			Assert.Contains("internal void _RegisterOwned(GameEntity entity, int key)", comp);
+			Assert.Contains("set.Add(entity);", comp);
+		}
+
+		[Fact]
+		public void EntityIndex_NotEmittedWhenComponentHasNoIndexedField()
+		{
+			TestHarness.Project p = Run(nameof(EntityIndex_NotEmittedWhenComponentHasNoIndexedField), OneGameHealth);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			Assert.DoesNotContain("partial class GameContext", comp);
+			Assert.DoesNotContain("_RegisterHealth", comp);
+		}
+
+		[Fact]
+		public void EntityIndex_OnUnwrappedValue_SetterMaintainsIndex()
+		{
+			// Edge: [PrimaryEntityIndex] on `public int Value;` — the
+			// unwrap setter (`entity.Score = ...`) needs to capture the
+			// old Value and unregister it before registering the new.
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G {
+	[Game] public class Score : IComponent {
+		[PrimaryEntityIndex] public int Value;
+	}
+}";
+			TestHarness.Project p = Run(nameof(EntityIndex_OnUnwrappedValue_SetterMaintainsIndex), source);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Score.cs");
+			Assert.Contains("int _prevValue = HasScore ? Score : default(int);", comp);
+			Assert.Contains("_ctx._UnregisterScore(this, _prevValue);", comp);
+			Assert.Contains("_ctx._RegisterScore(this, value);", comp);
+		}
 	}
 }

@@ -17,6 +17,14 @@ namespace Entities
 		public extern int creationIndex { get; }
 		public extern bool isEnabled { get; }
 
+		// Back-reference to the context that owns this entity. Set by
+		// Context.Initialize on creation; read by the codegen-emitted
+		// AddX/ReplaceX/RemoveX bodies for [Unique] singleton tracking and
+		// [EntityIndex]/[PrimaryEntityIndex] dict maintenance. Untyped on
+		// purpose — the codegen casts to the concrete {Ctx}Context when it
+		// needs the typed surface.
+		public extern IContext context { get; }
+
 		public extern void Initialize(int creationIndex, int totalComponents);
 		public extern void Reactivate(int creationIndex);
 

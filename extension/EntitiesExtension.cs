@@ -55,12 +55,26 @@ namespace RobloxCSharp.Extensions.Entities
 				references: BuildReferences(),
 				options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
-			INamedTypeSymbol componentInterface = compilation.GetTypeByMetadataName("Entities.IComponent");
-			INamedTypeSymbol contextAttribute = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.ContextAttribute");
-			INamedTypeSymbol replicatedAttribute = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.ReplicatedAttribute");
-			if (componentInterface is null || contextAttribute is null) return;
+			AttributeSymbols attrs = new()
+			{
+				Component = compilation.GetTypeByMetadataName("Entities.IComponent"),
+				Context = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.ContextAttribute"),
+				Replicated = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.ReplicatedAttribute"),
+				Unique = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.UniqueAttribute"),
+				EntityIndex = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.EntityIndexAttribute"),
+				PrimaryEntityIndex = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.PrimaryEntityIndexAttribute"),
+				PostConstructor = compilation.GetTypeByMetadataName("Entities.CodeGeneration.Attributes.PostConstructorAttribute"),
+			};
+			if (attrs.Component is null || attrs.Context is null) return;
 
 			Dictionary<string, ContextModel> byContext = new(StringComparer.Ordinal);
+
+			// [PostConstructor] scan — walk every `partial class Contexts` in
+			// user code, collect names of methods carrying the attribute.
+			// ContextsTemplate appends these as trailing calls in the
+			// generated Contexts() ctor so user-side index registration etc.
+			// runs after every per-context field is wired.
+			List<string> postConstructors = new();
 
 			foreach (SyntaxTree tree in trees)
 			{
@@ -72,15 +86,27 @@ namespace RobloxCSharp.Extensions.Entities
 				{
 					INamedTypeSymbol typeSymbol = model.GetDeclaredSymbol(classDecl) as INamedTypeSymbol;
 					if (typeSymbol is null) continue;
-					if (typeSymbol.IsAbstract) continue;
-					if (!ImplementsInterface(typeSymbol, componentInterface)) continue;
 
-					bool isReplicated = replicatedAttribute is not null
-						&& typeSymbol.GetAttributes().Any(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, replicatedAttribute));
+					// PostConstructor scan on `partial class Contexts`.
+					if (typeSymbol.Name == "Contexts" && attrs.PostConstructor is not null)
+					{
+						foreach (MethodDeclarationSyntax methodDecl in classDecl.Members.OfType<MethodDeclarationSyntax>())
+						{
+							IMethodSymbol methodSymbol = model.GetDeclaredSymbol(methodDecl) as IMethodSymbol;
+							if (methodSymbol is null) continue;
+							if (AttributeSymbols.HasAttribute(methodSymbol, attrs.PostConstructor))
+							{
+								if (!postConstructors.Contains(methodSymbol.Name)) postConstructors.Add(methodSymbol.Name);
+							}
+						}
+					}
+
+					if (typeSymbol.IsAbstract) continue;
+					if (!ImplementsInterface(typeSymbol, attrs.Component)) continue;
 
 					foreach (AttributeData attr in typeSymbol.GetAttributes())
 					{
-						if (!InheritsFrom(attr.AttributeClass, contextAttribute)) continue;
+						if (!InheritsFrom(attr.AttributeClass, attrs.Context)) continue;
 						string contextName = ExtractContextName(attr);
 						if (string.IsNullOrEmpty(contextName)) continue;
 
@@ -89,7 +115,7 @@ namespace RobloxCSharp.Extensions.Entities
 							ctx = new ContextModel(contextName);
 							byContext[contextName] = ctx;
 						}
-						ctx.Components.Add(new ComponentModel(typeSymbol, isReplicated));
+						ctx.Components.Add(new ComponentModel(typeSymbol, attrs));
 					}
 				}
 			}
@@ -158,7 +184,7 @@ namespace RobloxCSharp.Extensions.Entities
 				if (File.Exists(staleMirrorClient)) File.Delete(staleMirrorClient);
 			}
 
-			WriteFile(genDir, "Contexts.cs", ContextsTemplate.Emit(byContext.Values.OrderBy(c => c.Name, StringComparer.Ordinal).ToList()));
+			WriteFile(genDir, "Contexts.cs", ContextsTemplate.Emit(byContext.Values.OrderBy(c => c.Name, StringComparer.Ordinal).ToList(), postConstructors));
 
 			// Reap stale per-component files (component renamed, deleted,
 			// attribute removed) so the codegen stays idempotent.
@@ -276,6 +302,31 @@ namespace RobloxCSharp.Extensions.Entities
 		public ContextModel(string name) { Name = name; }
 	}
 
+	// Bundle of attribute symbols looked up once from the Roslyn
+	// compilation. Passed to ComponentModel so it doesn't have to re-query
+	// per field; also lets PreSourceDiscovery share the same lookups for
+	// scanning [PostConstructor] methods on partial Contexts.
+	internal sealed class AttributeSymbols
+	{
+		public INamedTypeSymbol Component;
+		public INamedTypeSymbol Context;
+		public INamedTypeSymbol Replicated;
+		public INamedTypeSymbol Unique;
+		public INamedTypeSymbol EntityIndex;
+		public INamedTypeSymbol PrimaryEntityIndex;
+		public INamedTypeSymbol PostConstructor;
+
+		public static bool HasAttribute(ISymbol symbol, INamedTypeSymbol attr)
+		{
+			if (attr is null || symbol is null) return false;
+			foreach (AttributeData a in symbol.GetAttributes())
+			{
+				if (SymbolEqualityComparer.Default.Equals(a.AttributeClass, attr)) return true;
+			}
+			return false;
+		}
+	}
+
 	internal sealed class ComponentModel
 	{
 		public INamedTypeSymbol Symbol { get; }
@@ -285,11 +336,21 @@ namespace RobloxCSharp.Extensions.Entities
 		public List<ComponentField> Fields { get; }
 		public bool IsFlag => Fields.Count == 0;
 		public bool IsReplicated { get; }
+		public bool IsUnique { get; }
+		public bool HasIndexedField
+		{
+			get
+			{
+				for (int i = 0; i < Fields.Count; i++) if (Fields[i].IsIndexed) return true;
+				return false;
+			}
+		}
 
-		public ComponentModel(INamedTypeSymbol symbol, bool isReplicated = false)
+		public ComponentModel(INamedTypeSymbol symbol, AttributeSymbols attrs)
 		{
 			Symbol = symbol;
-			IsReplicated = isReplicated;
+			IsReplicated = AttributeSymbols.HasAttribute(symbol, attrs.Replicated);
+			IsUnique = AttributeSymbols.HasAttribute(symbol, attrs.Unique);
 			FullName = symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 			NamespaceName = symbol.ContainingNamespace?.IsGlobalNamespace == false
 				? symbol.ContainingNamespace.ToDisplayString()
@@ -299,7 +360,10 @@ namespace RobloxCSharp.Extensions.Entities
 			{
 				if (member is IFieldSymbol field && field.DeclaredAccessibility == Accessibility.Public && !field.IsStatic && !field.IsConst)
 				{
-					Fields.Add(new ComponentField(field.Name, field.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)));
+					FieldIndexKind kind = FieldIndexKind.None;
+					if (AttributeSymbols.HasAttribute(field, attrs.PrimaryEntityIndex)) kind = FieldIndexKind.PrimaryIndex;
+					else if (AttributeSymbols.HasAttribute(field, attrs.EntityIndex)) kind = FieldIndexKind.Index;
+					Fields.Add(new ComponentField(field.Name, field.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat), kind));
 				}
 				// Property-shaped values (`public int Value { get; set; }`) are
 				// out of scope — frozen-feast uses plain fields everywhere — so
@@ -309,11 +373,19 @@ namespace RobloxCSharp.Extensions.Entities
 		}
 	}
 
+	internal enum FieldIndexKind { None, Index, PrimaryIndex }
+
 	internal readonly struct ComponentField
 	{
 		public string Name { get; }
 		public string TypeFullName { get; }
-		public ComponentField(string name, string typeFullName) { Name = name; TypeFullName = typeFullName; }
+		public FieldIndexKind IndexKind { get; }
+		public ComponentField(string name, string typeFullName, FieldIndexKind indexKind = FieldIndexKind.None)
+		{
+			Name = name; TypeFullName = typeFullName; IndexKind = indexKind;
+		}
+		public bool IsIndexed => IndexKind != FieldIndexKind.None;
+		public bool IsPrimaryIndexed => IndexKind == FieldIndexKind.PrimaryIndex;
 	}
 
 	// ----------------------------------------------------------------
@@ -404,12 +476,21 @@ namespace RobloxCSharp.Extensions.Entities
 			// Setter swaps the shared singleton instance in/out so we don't
 			// allocate per flip. Replicated flags enqueue Set/Remove ops on
 			// the per-context replication buffer, guarded by ShouldEmit so
-			// the client / suppress scopes skip the enqueue.
+			// the client / suppress scopes skip the enqueue. [Unique] flags
+			// tail-update the context's singleton field through the
+			// codegen-emitted _Set/_Clear hook — the entity API stays the
+			// same shape, the context just tracks who holds the flag.
 			string fireAdd = c.IsReplicated
 				? $" if (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueSet(\"{ctx.Name}\", {lookup}, creationIndex);"
 				: "";
 			string fireRemove = c.IsReplicated
 				? $" if (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueRemove(\"{ctx.Name}\", {lookup}, creationIndex);"
+				: "";
+			string uniqueSet = c.IsUnique
+				? $" if (context != null) (({ctx.Name}Context)context)._Set{c.TypeName}Entity(this);"
+				: "";
+			string uniqueClear = c.IsUnique
+				? $" if (context != null) (({ctx.Name}Context)context)._Clear{c.TypeName}Entity();"
 				: "";
 
 			sb.AppendLine($"\tstatic readonly {c.FullName} _{c.TypeName}Component = new();");
@@ -420,8 +501,8 @@ namespace RobloxCSharp.Extensions.Entities
 			sb.AppendLine("\t\t{");
 			sb.AppendLine($"\t\t\tif (value != Is{c.TypeName})");
 			sb.AppendLine("\t\t\t{");
-			sb.AppendLine($"\t\t\t\tif (value) {{ AddComponent({lookup}, _{c.TypeName}Component);{fireAdd} }}");
-			sb.AppendLine($"\t\t\t\telse {{ RemoveComponent({lookup});{fireRemove} }}");
+			sb.AppendLine($"\t\t\t\tif (value) {{ AddComponent({lookup}, _{c.TypeName}Component);{fireAdd}{uniqueSet} }}");
+			sb.AppendLine($"\t\t\t\telse {{ RemoveComponent({lookup});{fireRemove}{uniqueClear} }}");
 			sb.AppendLine("\t\t\t}");
 			sb.AppendLine("\t\t}");
 			sb.AppendLine("\t}");
@@ -450,6 +531,30 @@ namespace RobloxCSharp.Extensions.Entities
 			string fireRemove = c.IsReplicated
 				? $"\t\tif (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueRemove(\"{ctx.Name}\", {lookup}, creationIndex);"
 				: "";
+			// [Unique] singleton tracking — AddX / Replace / setter route
+			// `this` into the context's _xEntity field; RemoveX clears it.
+			// Casts through the typed {Ctx}Context partial that
+			// UniqueContextPartialTemplate emits.
+			string uniqueSet = c.IsUnique
+				? $"\t\tif (context != null) (({ctx.Name}Context)context)._Set{c.TypeName}Entity(this);"
+				: "";
+			string uniqueClear = c.IsUnique
+				? $"\t\tif (context != null) (({ctx.Name}Context)context)._Clear{c.TypeName}Entity();"
+				: "";
+
+			// [EntityIndex] / [PrimaryEntityIndex] dict maintenance — keys
+			// on field values. AddX registers the new key; ReplaceX captures
+			// the old key (read off `this.{Component}` before the swap) and
+			// then unregisters the old + registers the new; RemoveX captures
+			// the old key and unregisters. Multiple indexed fields on one
+			// component are supported — each gets its own register/unregister
+			// call sequence and (per IndexContextPartialTemplate) its own
+			// dict + lookup method.
+			int indexedFieldCount = 0;
+			for (int fi = 0; fi < c.Fields.Count; fi++) if (c.Fields[fi].IsIndexed) indexedFieldCount++;
+			List<ComponentField> indexedFields = c.Fields.Where(f => f.IsIndexed).ToList();
+			string IndexSuffix(ComponentField f) => indexedFieldCount > 1 ? f.Name : "";
+			string ReadField(ComponentField f) => (unwrap && f.Name == "Value") ? c.TypeName : $"{c.TypeName}.{f.Name}";
 
 			if (unwrap)
 			{
@@ -459,15 +564,36 @@ namespace RobloxCSharp.Extensions.Entities
 				string fireSetter = c.IsReplicated
 					? $"\t\t\tif (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueSet(\"{ctx.Name}\", {lookup}, creationIndex, value);"
 					: "";
+				string uniqueSetter = c.IsUnique
+					? $"\t\t\tif (context != null) (({ctx.Name}Context)context)._Set{c.TypeName}Entity(this);"
+					: "";
 				sb.AppendLine($"\tpublic {valueType} {c.TypeName}");
 				sb.AppendLine("\t{");
 				sb.AppendLine($"\t\tget {{ return (({c.FullName})GetComponent({lookup})).Value; }}");
 				sb.AppendLine("\t\tset");
 				sb.AppendLine("\t\t{");
+				// Index prev capture — Value-indexed only (unwrap implies one field).
+				if (c.Fields[0].IsIndexed)
+				{
+					sb.AppendLine($"\t\t\t{valueType} _prevValue = Has{c.TypeName} ? {c.TypeName} : default({valueType});");
+					sb.AppendLine($"\t\t\tbool _had{c.TypeName} = Has{c.TypeName};");
+				}
 				sb.AppendLine($"\t\t\t{c.FullName} component = CreateComponent<{c.FullName}>({lookup});");
 				sb.AppendLine($"\t\t\tcomponent.Value = value;");
 				sb.AppendLine($"\t\t\tReplaceComponent({lookup}, component);");
 				if (c.IsReplicated) sb.AppendLine(fireSetter);
+				if (c.IsUnique) sb.AppendLine(uniqueSetter);
+				if (c.Fields[0].IsIndexed)
+				{
+					ComponentField f = c.Fields[0];
+					string suffix = IndexSuffix(f);
+					sb.AppendLine($"\t\t\tif (context != null)");
+					sb.AppendLine("\t\t\t{");
+					sb.AppendLine($"\t\t\t\t{ctx.Name}Context _ctx = ({ctx.Name}Context)context;");
+					sb.AppendLine($"\t\t\t\tif (_had{c.TypeName}) _ctx._Unregister{c.TypeName}{suffix}(this, _prevValue);");
+					sb.AppendLine($"\t\t\t\t_ctx._Register{c.TypeName}{suffix}(this, value);");
+					sb.AppendLine("\t\t\t}");
+				}
 				sb.AppendLine("\t\t}");
 				sb.AppendLine("\t}");
 			}
@@ -488,24 +614,71 @@ namespace RobloxCSharp.Extensions.Entities
 			sb.AppendLine($"\t\t{fieldAssigns}");
 			sb.AppendLine($"\t\tAddComponent({lookup}, component);");
 			if (c.IsReplicated) sb.AppendLine(fireSet);
+			if (c.IsUnique) sb.AppendLine(uniqueSet);
+			foreach (ComponentField f in indexedFields)
+			{
+				string suffix = IndexSuffix(f);
+				sb.AppendLine($"\t\tif (context != null) (({ctx.Name}Context)context)._Register{c.TypeName}{suffix}(this, new{f.Name});");
+			}
 			sb.AppendLine("\t\treturn component;");
 			sb.AppendLine("\t}");
 
 			sb.AppendLine();
 			sb.AppendLine($"\tpublic {c.FullName} Replace{c.TypeName}({ctorArgs})");
 			sb.AppendLine("\t{");
+			// Capture pre-replace state for each indexed field so we can
+			// unregister the old key after the swap.
+			foreach (ComponentField f in indexedFields)
+			{
+				sb.AppendLine($"\t\t{f.TypeFullName} _prev{f.Name} = Has{c.TypeName} ? {ReadField(f)} : default({f.TypeFullName});");
+			}
+			if (indexedFields.Count > 0)
+				sb.AppendLine($"\t\tbool _had{c.TypeName} = Has{c.TypeName};");
 			sb.AppendLine($"\t\t{c.FullName} component = CreateComponent<{c.FullName}>({lookup});");
 			sb.AppendLine($"\t\t{fieldAssigns}");
 			sb.AppendLine($"\t\tReplaceComponent({lookup}, component);");
 			if (c.IsReplicated) sb.AppendLine(fireSet);
+			if (c.IsUnique) sb.AppendLine(uniqueSet);
+			if (indexedFields.Count > 0)
+			{
+				sb.AppendLine("\t\tif (context != null)");
+				sb.AppendLine("\t\t{");
+				sb.AppendLine($"\t\t\t{ctx.Name}Context _ctx = ({ctx.Name}Context)context;");
+				foreach (ComponentField f in indexedFields)
+				{
+					string suffix = IndexSuffix(f);
+					sb.AppendLine($"\t\t\tif (_had{c.TypeName}) _ctx._Unregister{c.TypeName}{suffix}(this, _prev{f.Name});");
+					sb.AppendLine($"\t\t\t_ctx._Register{c.TypeName}{suffix}(this, new{f.Name});");
+				}
+				sb.AppendLine("\t\t}");
+			}
 			sb.AppendLine("\t\treturn component;");
 			sb.AppendLine("\t}");
 
 			sb.AppendLine();
 			sb.AppendLine($"\tpublic void Remove{c.TypeName}()");
 			sb.AppendLine("\t{");
+			foreach (ComponentField f in indexedFields)
+			{
+				sb.AppendLine($"\t\t{f.TypeFullName} _prev{f.Name} = Has{c.TypeName} ? {ReadField(f)} : default({f.TypeFullName});");
+			}
+			if (indexedFields.Count > 0)
+				sb.AppendLine($"\t\tbool _had{c.TypeName} = Has{c.TypeName};");
 			sb.AppendLine($"\t\tRemoveComponent({lookup});");
 			if (c.IsReplicated) sb.AppendLine(fireRemove);
+			if (c.IsUnique) sb.AppendLine(uniqueClear);
+			if (indexedFields.Count > 0)
+			{
+				sb.AppendLine($"\t\tif (_had{c.TypeName} && context != null)");
+				sb.AppendLine("\t\t{");
+				sb.AppendLine($"\t\t\t{ctx.Name}Context _ctx = ({ctx.Name}Context)context;");
+				foreach (ComponentField f in indexedFields)
+				{
+					string suffix = IndexSuffix(f);
+					sb.AppendLine($"\t\t\t_ctx._Unregister{c.TypeName}{suffix}(this, _prev{f.Name});");
+				}
+				sb.AppendLine("\t\t}");
+			}
 			sb.AppendLine("\t}");
 		}
 	}
@@ -763,8 +936,8 @@ namespace RobloxCSharp.Extensions.Entities
 
 	// One file per (context, component) pair — the navigable unit of the
 	// codegen. Holds the entity property/methods + the matcher static
-	// getter for that single component, both as `partial class` members.
-	// The transpiler merges every partial back into one Luau class.
+	// getter + (for [Unique]) the context-level singleton accessors. The
+	// transpiler merges every partial back into one Luau class.
 	internal static class ComponentTemplate
 	{
 		public static string Emit(ContextModel ctx, ComponentModel c)
@@ -788,13 +961,238 @@ namespace RobloxCSharp.Extensions.Entities
 			MatcherTemplate.EmitComponentGetter(sb, ctx, c);
 			sb.AppendLine("}");
 
+			if (c.IsUnique)
+			{
+				sb.AppendLine();
+				UniqueContextPartialTemplate.Emit(sb, ctx, c);
+			}
+
+			if (c.HasIndexedField)
+			{
+				sb.AppendLine();
+				IndexContextPartialTemplate.Emit(sb, ctx, c);
+			}
+
 			return sb.ToString();
 		}
 	}
 
+	// [EntityIndex] / [PrimaryEntityIndex] support — emitted as a
+	// `partial class {Ctx}Context` block per indexed field. Each indexed
+	// field contributes:
+	//   • a private dict: `Dictionary<TKey, {Ctx}Entity>` for primary,
+	//     `Dictionary<TKey, HashSet<{Ctx}Entity>>` for non-primary
+	//   • a public lookup: `GetEntityWith{Component}(TKey)` returning the
+	//     single entity (or null) for primary, or
+	//     `GetEntitiesWith{Component}(TKey)` returning an IEnumerable for
+	//     non-primary
+	//   • internal `_Register{Component}` / `_Unregister{Component}` hooks
+	//     called from the entity's AddX / ReplaceX / RemoveX / setter
+	//     bodies to keep the dict in sync
+	// If a component has more than one indexed field, the method/hook
+	// names are disambiguated with the field name suffix.
+	internal static class IndexContextPartialTemplate
+	{
+		public static void Emit(StringBuilder sb, ContextModel ctx, ComponentModel c)
+		{
+			string entityType = $"{ctx.Name}Entity";
+			int indexedCount = 0;
+			for (int i = 0; i < c.Fields.Count; i++) if (c.Fields[i].IsIndexed) indexedCount++;
+
+			sb.AppendLine($"public sealed partial class {ctx.Name}Context");
+			sb.AppendLine("{");
+			foreach (ComponentField f in c.Fields)
+			{
+				if (!f.IsIndexed) continue;
+				string suffix = indexedCount > 1 ? f.Name : "";
+				string keyType = f.TypeFullName;
+				string dictField = $"_{LowerFirst(c.TypeName)}By{f.Name}";
+
+				if (f.IsPrimaryIndexed)
+				{
+					sb.AppendLine($"\tprivate System.Collections.Generic.Dictionary<{keyType}, {entityType}> {dictField} = new();");
+
+					// Lookup — null when missing. Matches Entitas's
+					// `GetEntityWith{Component}` shape.
+					sb.AppendLine($"\tpublic {entityType} GetEntityWith{c.TypeName}{suffix}({keyType} key)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tif ({dictField}.ContainsKey(key)) return {dictField}[key];");
+					sb.AppendLine("\t\treturn null;");
+					sb.AppendLine("\t}");
+
+					// Register — duplicate key on a different entity is a
+					// hard error. Matches Entitas's primary-index guarantee:
+					// one entity per key, conflicts surface immediately.
+					sb.AppendLine($"\tinternal void _Register{c.TypeName}{suffix}({entityType} entity, {keyType} key)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tif ({dictField}.ContainsKey(key) && {dictField}[key] != entity)");
+					sb.AppendLine($"\t\t\tthrow new System.Exception(\"PrimaryEntityIndex collision on {c.TypeName}.{f.Name} for key: \" + key);");
+					sb.AppendLine($"\t\t{dictField}[key] = entity;");
+					sb.AppendLine("\t}");
+
+					sb.AppendLine($"\tinternal void _Unregister{c.TypeName}{suffix}({entityType} entity, {keyType} key)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tif ({dictField}.ContainsKey(key) && {dictField}[key] == entity) {dictField}.Remove(key);");
+					sb.AppendLine("\t}");
+				}
+				else
+				{
+					sb.AppendLine($"\tprivate System.Collections.Generic.Dictionary<{keyType}, System.Collections.Generic.HashSet<{entityType}>> {dictField} = new();");
+
+					// Lookup — empty enumerable when missing so callers can
+					// foreach unconditionally.
+					sb.AppendLine($"\tpublic System.Collections.Generic.IEnumerable<{entityType}> GetEntitiesWith{c.TypeName}{suffix}({keyType} key)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tif ({dictField}.ContainsKey(key)) return {dictField}[key];");
+					sb.AppendLine($"\t\treturn System.Linq.Enumerable.Empty<{entityType}>();");
+					sb.AppendLine("\t}");
+
+					sb.AppendLine($"\tinternal void _Register{c.TypeName}{suffix}({entityType} entity, {keyType} key)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tSystem.Collections.Generic.HashSet<{entityType}> set;");
+					sb.AppendLine($"\t\tif ({dictField}.ContainsKey(key)) {{ set = {dictField}[key]; }}");
+					sb.AppendLine($"\t\telse {{ set = new System.Collections.Generic.HashSet<{entityType}>(); {dictField}[key] = set; }}");
+					sb.AppendLine("\t\tset.Add(entity);");
+					sb.AppendLine("\t}");
+
+					sb.AppendLine($"\tinternal void _Unregister{c.TypeName}{suffix}({entityType} entity, {keyType} key)");
+					sb.AppendLine("\t{");
+					sb.AppendLine($"\t\tif ({dictField}.ContainsKey(key)) {dictField}[key].Remove(entity);");
+					sb.AppendLine("\t}");
+				}
+			}
+			sb.AppendLine("}");
+		}
+
+		private static string LowerFirst(string s)
+			=> string.IsNullOrEmpty(s) ? s : char.ToLowerInvariant(s[0]) + s.Substring(1);
+	}
+
+	// [Unique] support — emitted as a `partial class {Ctx}Context` block
+	// inside the per-component file. Each Unique component contributes:
+	//   • a private `_{name}Entity` field
+	//   • public `{lowerName}Entity` / `is{Name}` (flag) or `{Name}`/`has{Name}`
+	//     (value) accessors that read through the singleton
+	//   • `Set{Name}(...)` / `Unset{Name}()` lifecycle methods
+	//   • internal `_Set{Name}Entity(this)` / `_Clear{Name}Entity()` hooks
+	//     called from the entity's AddX / ReplaceX / RemoveX / setter
+	//     bodies so user code that mutates via the entity API stays in sync
+	//     with the context's singleton field. Duplicate assignment throws —
+	//     "Unique" means one entity at a time, matching Entitas.
+	internal static class UniqueContextPartialTemplate
+	{
+		public static void Emit(StringBuilder sb, ContextModel ctx, ComponentModel c)
+		{
+			string entityType = $"{ctx.Name}Entity";
+			string field = $"_{LowerFirst(c.TypeName)}Entity";
+			string entityProp = $"{LowerFirst(c.TypeName)}Entity";
+
+			sb.AppendLine($"public sealed partial class {ctx.Name}Context");
+			sb.AppendLine("{");
+			sb.AppendLine($"\tprivate {entityType} {field};");
+			sb.AppendLine($"\tpublic {entityType} {entityProp} {{ get {{ return {field}; }} }}");
+
+			if (c.IsFlag)
+			{
+				// Flag: `isPlayer` returns true iff the holder still carries it.
+				sb.AppendLine($"\tpublic bool is{c.TypeName} {{ get {{ return {field} != null && {field}.Is{c.TypeName}; }} }}");
+
+				// Set: create-on-demand, then flip the flag. Idempotent —
+				// re-call when already set is a no-op.
+				sb.AppendLine($"\tpublic {entityType} Set{c.TypeName}()");
+				sb.AppendLine("\t{");
+				sb.AppendLine($"\t\tif ({field} == null) {field} = CreateEntity();");
+				sb.AppendLine($"\t\t{field}.Is{c.TypeName} = true;");
+				sb.AppendLine($"\t\treturn {field};");
+				sb.AppendLine("\t}");
+
+				// Unset: destroy the holder (Entitas convention — Unique
+				// entities are conventionally single-component, so destroy
+				// is the cleanest cleanup; user can call entity APIs
+				// directly if they want more granular control).
+				sb.AppendLine($"\tpublic void Unset{c.TypeName}()");
+				sb.AppendLine("\t{");
+				sb.AppendLine($"\t\tif ({field} != null)");
+				sb.AppendLine("\t\t{");
+				sb.AppendLine($"\t\t\t{field}.Destroy();");
+				sb.AppendLine($"\t\t\t{field} = null;");
+				sb.AppendLine("\t\t}");
+				sb.AppendLine("\t}");
+			}
+			else
+			{
+				bool unwrap = c.Fields.Count == 1 && c.Fields[0].Name == "Value";
+
+				// `has{Name}` mirrors the entity-side Has check, gated by
+				// the singleton presence.
+				sb.AppendLine($"\tpublic bool has{c.TypeName} {{ get {{ return {field} != null && {field}.Has{c.TypeName}; }} }}");
+
+				if (unwrap)
+				{
+					// Single-Value: expose the unwrapped value directly so
+					// `gameContext.Health` returns `int`, not the component.
+					string valueType = c.Fields[0].TypeFullName;
+					sb.AppendLine($"\tpublic {valueType} {c.TypeName} {{ get {{ return {field} != null ? {field}.{c.TypeName} : default({valueType}); }} }}");
+				}
+				else
+				{
+					sb.AppendLine($"\tpublic {c.FullName} {LowerFirst(c.TypeName)} {{ get {{ return {field} != null ? {field}.{c.TypeName} : null; }} }}");
+				}
+
+				// Set / Replace: factory + assignment. Same ctor-arg shape
+				// as entity AddX so caller doesn't have to think about
+				// whether the holder exists yet.
+				string ctorArgs = string.Join(", ", c.Fields.Select(f => $"{f.TypeFullName} new{f.Name}"));
+				string callArgs = string.Join(", ", c.Fields.Select(f => $"new{f.Name}"));
+				sb.AppendLine($"\tpublic {entityType} Set{c.TypeName}({ctorArgs})");
+				sb.AppendLine("\t{");
+				sb.AppendLine($"\t\tif ({field} == null)");
+				sb.AppendLine("\t\t{");
+				sb.AppendLine($"\t\t\t{field} = CreateEntity();");
+				sb.AppendLine($"\t\t\t{field}.Add{c.TypeName}({callArgs});");
+				sb.AppendLine("\t\t}");
+				sb.AppendLine("\t\telse");
+				sb.AppendLine("\t\t{");
+				sb.AppendLine($"\t\t\t{field}.Replace{c.TypeName}({callArgs});");
+				sb.AppendLine("\t\t}");
+				sb.AppendLine($"\t\treturn {field};");
+				sb.AppendLine("\t}");
+
+				sb.AppendLine($"\tpublic {entityType} Replace{c.TypeName}({ctorArgs}) {{ return Set{c.TypeName}({callArgs}); }}");
+
+				sb.AppendLine($"\tpublic void Unset{c.TypeName}()");
+				sb.AppendLine("\t{");
+				sb.AppendLine($"\t\tif ({field} != null)");
+				sb.AppendLine("\t\t{");
+				sb.AppendLine($"\t\t\t{field}.Destroy();");
+				sb.AppendLine($"\t\t\t{field} = null;");
+				sb.AppendLine("\t\t}");
+				sb.AppendLine("\t}");
+			}
+
+			// Internal hooks — invoked by codegen-emitted entity bodies so
+			// that user code mutating via the entity API stays in sync.
+			// `_Set` throws on conflicting holder to match Entitas's
+			// "one entity at a time" guarantee.
+			sb.AppendLine($"\tinternal void _Set{c.TypeName}Entity({entityType} entity)");
+			sb.AppendLine("\t{");
+			sb.AppendLine($"\t\tif ({field} != null && {field} != entity)");
+			sb.AppendLine("\t\t{");
+			sb.AppendLine($"\t\t\tthrow new System.Exception(\"Unique component {c.TypeName} is already assigned to a different entity.\");");
+			sb.AppendLine("\t\t}");
+			sb.AppendLine($"\t\t{field} = entity;");
+			sb.AppendLine("\t}");
+			sb.AppendLine($"\tinternal void _Clear{c.TypeName}Entity() {{ {field} = null; }}");
+			sb.AppendLine("}");
+		}
+
+		private static string LowerFirst(string s)
+			=> string.IsNullOrEmpty(s) ? s : char.ToLowerInvariant(s[0]) + s.Substring(1);
+	}
+
 	internal static class ContextsTemplate
 	{
-		public static string Emit(List<ContextModel> contexts)
+		public static string Emit(List<ContextModel> contexts, List<string> postConstructors)
 		{
 			StringBuilder sb = new();
 			sb.AppendLine("// <auto-generated/> roblox-csharp-entities");
@@ -828,6 +1226,16 @@ namespace RobloxCSharp.Extensions.Entities
 			foreach (ContextModel ctx in contexts)
 			{
 				sb.AppendLine($"\t\t{LowerFirst(ctx.Name)} = new {ctx.Name}Context();");
+			}
+			// [PostConstructor] tail-calls. Run after every per-context
+			// field is wired so user code can register entity indices,
+			// etc. without ordering surprises.
+			if (postConstructors != null)
+			{
+				foreach (string name in postConstructors)
+				{
+					sb.AppendLine($"\t\t{name}();");
+				}
 			}
 			sb.AppendLine("\t}");
 			sb.AppendLine();

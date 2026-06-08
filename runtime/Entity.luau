@@ -25,6 +25,7 @@ end
 function Entity:totalComponents() return self._totalComponents end
 function Entity:creationIndex() return self._creationIndex end
 function Entity:isEnabled() return self._isEnabled end
+function Entity:context() return self._context end
 
 function Entity:Initialize(creationIndex, totalComponents)
 	self._creationIndex = creationIndex
