@@ -158,10 +158,11 @@ namespace Entities.Tests
 		{
 			string s = Read(RuntimeFile("Debug", "Debugger.luau"));
 			foreach (string member in new[] {
-				"function Debugger.new(plasma)",
+				"function Debugger.new()",
 				"function Debugger:AttachContext(context, componentsLookup)",
 				"function Debugger:RegisterSystemName(classTable, name)",
-				"function Debugger:AutoInitialize(groups)",
+				"function Debugger:AutoInitialize(signal, features)",
+				"function Debugger:AddFeatureGroup(signal, features)",
 				"function Debugger:Show()",
 				"function Debugger:Hide()",
 				"function Debugger:Toggle()",

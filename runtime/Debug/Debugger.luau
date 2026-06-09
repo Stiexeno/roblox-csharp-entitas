@@ -19,6 +19,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 
+local Plasma = require(script.Parent.Parent.Plasma)
 local DebuggerProfiler = require(script.Parent.DebuggerProfiler)
 local DebuggerSnapshot = require(script.Parent.DebuggerSnapshot)
 local SystemNameCache = require(script.Parent.SystemNameCache)
@@ -37,19 +38,11 @@ local TOGGLE_KEY = Enum.KeyCode.F4
 local Debugger = {}
 Debugger.__index = Debugger
 
-local function assertCompatiblePlasma(plasma)
-	if plasma == nil or plasma.highlight == nil then
-		error("Plasma passed to Debugger is missing 'highlight' — update vendored plasma.")
-	end
-end
-
-function Debugger.new(plasma)
-	assertCompatiblePlasma(plasma)
-
+function Debugger.new()
 	local wire = DebuggerWire.GetOrCreateRemoteEvent()
 
 	local self = setmetatable({
-		plasma = plasma,
+		plasma = Plasma,
 		enabled = false,
 
 		contexts = {},          -- array of { context, lookup, listener }
@@ -91,8 +84,15 @@ function Debugger:RegisterSystemName(classTable, name)
 	SystemNameCache.RegisterSystemName(classTable, name)
 end
 
-function Debugger:AutoInitialize(groups)
-	assert(type(groups) == "table", "AutoInitialize expects an array of {signal, features} groups")
+-- Wires the debugger to a signal + an array of features running on it.
+-- Most games call this once with (RunService.Heartbeat, {gameFeature}).
+-- Games splitting features across signals (Heartbeat for sim, RenderStepped
+-- for view) call AddFeatureGroup once per extra signal — AutoInitialize
+-- still creates the ScreenGui + the toggle binding, AddFeatureGroup just
+-- profiles additional features without driving plasma frames.
+function Debugger:AutoInitialize(signal, features)
+	assert(signal ~= nil, "AutoInitialize: signal is nil")
+	assert(type(features) == "table", "AutoInitialize: features must be an array")
 
 	local parent = Instance.new("ScreenGui")
 	parent.Name = "EntitiesDebugger"
@@ -111,30 +111,15 @@ function Debugger:AutoInitialize(groups)
 	self.plasmaNode = self.plasma.new(parent)
 	self.guiParent = parent
 
-	for _, group in ipairs(groups) do
-		local profiler = DebuggerProfiler.new()
-		local bound = profiler:Bind()
-		for _, feature in ipairs(group.features) do
-			feature:SetProfiler(bound)
-		end
-		table.insert(self.featureGroups, {
-			signal = group.signal,
-			features = group.features,
-			profiler = profiler,
-			connection = nil,
-		})
-	end
+	self:AddFeatureGroup(signal, features)
 
-	-- Drive plasma frames from the FIRST signal. Other signals still
-	-- profile (their features each have SetProfiler set), but UI redraws
-	-- once per first-signal tick — typical: Heartbeat for game logic, the
-	-- UI shows 60Hz timings.
-	if #self.featureGroups > 0 then
-		local first = self.featureGroups[1]
-		first.connection = first.signal:Connect(function(deltaTime)
-			self:_tick(deltaTime)
-		end)
-	end
+	-- The primary signal drives plasma frames (beginFrame/finishFrame).
+	-- Secondary groups added via AddFeatureGroup profile their features
+	-- but don't drive the UI.
+	local primary = self.featureGroups[1]
+	primary.connection = primary.signal:Connect(function(deltaTime)
+		self:_tick(deltaTime)
+	end)
 
 	if IS_CLIENT then
 		self.plasma.hydrateAutomaticSize()
@@ -145,6 +130,22 @@ function Debugger:AutoInitialize(groups)
 			if input.KeyCode == TOGGLE_KEY then self:Toggle() end
 		end)
 	end
+end
+
+-- Profile an additional feature group on a different signal. Optional —
+-- AutoInitialize wires the primary group; this is for multi-signal games.
+function Debugger:AddFeatureGroup(signal, features)
+	local profiler = DebuggerProfiler.new()
+	local bound = profiler:Bind()
+	for i = 1, #features do
+		features[i]:SetProfiler(bound)
+	end
+	table.insert(self.featureGroups, {
+		signal = signal,
+		features = features,
+		profiler = profiler,
+		connection = nil,
+	})
 end
 
 function Debugger:_tick(deltaTime)
