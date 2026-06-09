@@ -34,6 +34,27 @@ function DebuggerProfiler:GetAverage(system, phaseName)
 	return RollingAverage.getAverage(samples)
 end
 
+-- Returns (avg, min, max) over the rolling buffer. All in seconds.
+-- min/max walk the buffer each call (60-sample max) so we don't need
+-- to track extra state that'd get invalidated on ring overwrite.
+function DebuggerProfiler:GetStats(system, phaseName)
+	local perSystem = self._samples[system]
+	if perSystem == nil then return 0, 0, 0 end
+	local samples = perSystem[phaseName]
+	if samples == nil or #samples == 0 then return 0, 0, 0 end
+	local sum = 0
+	local lo = math.huge
+	local hi = 0
+	for i = 1, #samples do
+		local v = samples[i]
+		sum = sum + v
+		if v < lo then lo = v end
+		if v > hi then hi = v end
+	end
+	if lo == math.huge then lo = 0 end
+	return sum / #samples, lo, hi
+end
+
 function DebuggerProfiler:Profile(system, phaseName)
 	if self._skip[system] then return end
 

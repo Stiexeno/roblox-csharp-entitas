@@ -18,7 +18,10 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local DebuggerWire = {}
 
-local REMOTE_NAME = "Debugger"
+-- Named DebuggerRemote (not just "Debugger") because the runtime ships
+-- a sibling ModuleScript named Debugger at Plugins.Entities.Debugger —
+-- WaitForChild("Debugger") would resolve to the module, not the event.
+local REMOTE_NAME = "DebuggerRemote"
 
 local function pluginsEntitiesFolder()
 	local plugins = ReplicatedStorage:WaitForChild("Plugins")
@@ -36,7 +39,10 @@ function DebuggerWire.GetOrCreateRemoteEvent()
 		end
 		return ev
 	else
-		return parent:WaitForChild(REMOTE_NAME)
+		-- 2-second timeout. If the server doesn't construct a Debugger
+		-- (client-only debug), this returns nil and server-view paths
+		-- gracefully no-op rather than the client hanging.
+		return parent:WaitForChild(REMOTE_NAME, 2)
 	end
 end
 

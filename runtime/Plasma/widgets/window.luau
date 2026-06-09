@@ -236,11 +236,19 @@ return Runtime.widget(function(options, fn)
 						)
 
 						local size = initialSize + delta
-
-						ref.container:SetAttribute(
-							"maxSize",
-							Vector2.new(math.max(MIN_SIZE.X, size.X), math.max(MIN_SIZE.Y, size.Y))
+						local clamped = Vector2.new(
+							math.max(MIN_SIZE.X, size.X),
+							math.max(MIN_SIZE.Y, size.Y)
 						)
+						-- Set BOTH maxSize and minSize to the dragged value so
+						-- applyLayout uses the user's size verbatim. Upstream
+						-- plasma only sets maxSize, which means the container
+						-- can't grow beyond its content width — fine for
+						-- vertical (content grows with scrollable rows) but
+						-- breaks horizontal resize, since our text content is
+						-- typically narrower than the user wants the window.
+						ref.container:SetAttribute("maxSize", clamped)
+						ref.container:SetAttribute("minSize", clamped)
 					end)
 				end,
 

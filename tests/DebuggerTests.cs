@@ -128,7 +128,7 @@ namespace Entities.Tests
 		[InlineData("SystemNameCache.luau")]
 		public void Debugger_FileExists(string name)
 		{
-			string path = RuntimeFile("Debug", name);
+			string path = RuntimeFile(name);
 			Assert.True(System.IO.File.Exists(path), $"Debug file missing: {path}");
 		}
 
@@ -149,20 +149,20 @@ namespace Entities.Tests
 		[InlineData("CodeText.luau")]
 		public void Debugger_WidgetExists(string name)
 		{
-			string path = RuntimeFile("Debug", "widgets", name);
+			string path = RuntimeFile("widgets", name);
 			Assert.True(System.IO.File.Exists(path), $"Widget missing: {path}");
 		}
 
 		[Fact]
 		public void Debugger_PublicApiPresent()
 		{
-			string s = Read(RuntimeFile("Debug", "Debugger.luau"));
+			string s = Read(RuntimeFile("Debugger.luau"));
 			foreach (string member in new[] {
 				"function Debugger.new()",
 				"function Debugger:AttachContext(context, componentsLookup)",
 				"function Debugger:RegisterSystemName(classTable, name)",
-				"function Debugger:AutoInitialize(signal, features)",
-				"function Debugger:AddFeatureGroup(signal, features)",
+				"function Debugger:AutoInitialize(features)",
+				"function Debugger:AddProfiledFeatures(features)",
 				"function Debugger:Show()",
 				"function Debugger:Hide()",
 				"function Debugger:Toggle()",
@@ -178,7 +178,7 @@ namespace Entities.Tests
 		[Fact]
 		public void Debugger_WiresUpRemoteEventActions()
 		{
-			string s = Read(RuntimeFile("Debug", "Debugger.luau"));
+			string s = Read(RuntimeFile("Debugger.luau"));
 			// Each server-side action handler — these are the wire shape
 			// the plan committed to; if they disappear, server view breaks.
 			Assert.Contains("if action == \"event\" then", s);
@@ -191,7 +191,7 @@ namespace Entities.Tests
 		[Fact]
 		public void DebuggerSnapshot_HasThreeModes()
 		{
-			string s = Read(RuntimeFile("Debug", "DebuggerSnapshot.luau"));
+			string s = Read(RuntimeFile("DebuggerSnapshot.luau"));
 			Assert.Contains("MODE_OFF = \"off\"", s);
 			Assert.Contains("MODE_DELTA = \"delta\"", s);
 			Assert.Contains("MODE_FULL = \"full\"", s);
@@ -202,7 +202,7 @@ namespace Entities.Tests
 		[Fact]
 		public void DebuggerProfiler_TracksSamplesAndSkip()
 		{
-			string s = Read(RuntimeFile("Debug", "DebuggerProfiler.luau"));
+			string s = Read(RuntimeFile("DebuggerProfiler.luau"));
 			Assert.Contains("self._samples", s);
 			Assert.Contains("self._skip", s);
 			Assert.Contains("self._errors", s);
@@ -214,7 +214,7 @@ namespace Entities.Tests
 		[Fact]
 		public void DebuggerWire_UsesPluginsEntitiesNamespace()
 		{
-			string s = Read(RuntimeFile("Debug", "DebuggerWire.luau"));
+			string s = Read(RuntimeFile("DebuggerWire.luau"));
 			Assert.Contains("WaitForChild(\"Plugins\")", s);
 			Assert.Contains("WaitForChild(\"Entities\")", s);
 			Assert.Contains("REMOTE_NAME = \"Debugger\"", s);
@@ -223,7 +223,7 @@ namespace Entities.Tests
 		[Fact]
 		public void HookContext_UsesCurrentSystemStack()
 		{
-			string s = Read(RuntimeFile("Debug", "DebuggerHookContext.luau"));
+			string s = Read(RuntimeFile("DebuggerHookContext.luau"));
 			Assert.Contains("PushDebugSystem", s);
 			Assert.Contains("PopDebugSystem", s);
 			Assert.Contains("function DebuggerHookContext.Hook(debugger)", s);
@@ -235,7 +235,7 @@ namespace Entities.Tests
 		[Fact]
 		public void MouseHighlight_ReadsNamespacedAttributes()
 		{
-			string s = Read(RuntimeFile("Debug", "MouseHighlight.luau"));
+			string s = Read(RuntimeFile("MouseHighlight.luau"));
 			Assert.Contains("debug_serverEntityId", s);
 			Assert.Contains("debug_clientEntityId", s);
 			Assert.Contains("Enum.KeyCode.LeftAlt", s);
@@ -244,7 +244,7 @@ namespace Entities.Tests
 		[Fact]
 		public void SystemNameCache_HasRegistryOverride()
 		{
-			string s = Read(RuntimeFile("Debug", "SystemNameCache.luau"));
+			string s = Read(RuntimeFile("SystemNameCache.luau"));
 			Assert.Contains("function SystemNameCache.GetName(system)", s);
 			Assert.Contains("function SystemNameCache.RegisterSystemName(classTable, name)", s);
 			// debug.info-based resolution is the no-transpiler-changes path

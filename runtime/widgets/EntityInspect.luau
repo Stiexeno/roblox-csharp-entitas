@@ -42,7 +42,7 @@ return function(debugger, contextEntry, objectStack)
 			if name == nil and lookup ~= nil then name = lookup[idx] end
 			name = name or ("component " .. tostring(idx))
 
-			local sideText = type(component) == "table" and "{…}" or FormatTable(component)
+			local sideText = type(component) == "table" and "{…}" or tostring(component)
 			table.insert(rows, {
 				text = name,
 				sideText = sideText,

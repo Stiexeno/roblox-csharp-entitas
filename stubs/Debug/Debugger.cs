@@ -33,15 +33,17 @@ namespace Entities.Debug
 		// instance.
 		public extern void RegisterSystemName(object classTable, string name);
 
-		// Wires the primary feature group to a signal (usually
-		// RunService.Heartbeat). Creates the ScreenGui, binds F4, and
-		// drives plasma frames.
-		public extern void AutoInitialize(object signal, Feature[] features);
+		// One-time setup: ScreenGui, F4 binding, Heartbeat-driven plasma
+		// frames, and a profiler hooked onto each feature so per-system
+		// timing flows without the user passing a signal. The user
+		// separately drives Feature.Execute on whichever signal they
+		// want; profiler captures wherever Execute is called.
+		public extern void AutoInitialize(Feature[] features);
 
-		// For games that split features across multiple signals
-		// (Heartbeat + RenderStepped). Profiles the extra features on
-		// their own signal; only AutoInitialize's signal drives the UI.
-		public extern void AddFeatureGroup(object signal, Feature[] features);
+		// Attach a profiler to features added after AutoInitialize —
+		// useful when features are constructed lazily (e.g., entering a
+		// level loads gameplay features that weren't around at startup).
+		public extern void AddProfiledFeatures(Feature[] features);
 
 		// Show / Hide / Toggle — client-only. F4 calls Toggle.
 		public extern void Show();

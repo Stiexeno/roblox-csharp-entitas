@@ -19,7 +19,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 
-local Plasma = require(script.Parent.Parent.Plasma)
+local UI_SIGNAL = RunService.Heartbeat
+
+local Plasma = require(script.Parent.Plasma)
 local DebuggerProfiler = require(script.Parent.DebuggerProfiler)
 local DebuggerSnapshot = require(script.Parent.DebuggerSnapshot)
 local SystemNameCache = require(script.Parent.SystemNameCache)
@@ -84,14 +86,12 @@ function Debugger:RegisterSystemName(classTable, name)
 	SystemNameCache.RegisterSystemName(classTable, name)
 end
 
--- Wires the debugger to a signal + an array of features running on it.
--- Most games call this once with (RunService.Heartbeat, {gameFeature}).
--- Games splitting features across signals (Heartbeat for sim, RenderStepped
--- for view) call AddFeatureGroup once per extra signal — AutoInitialize
--- still creates the ScreenGui + the toggle binding, AddFeatureGroup just
--- profiles additional features without driving plasma frames.
-function Debugger:AutoInitialize(signal, features)
-	assert(signal ~= nil, "AutoInitialize: signal is nil")
+-- One-time setup: ScreenGui, F4 binding, Heartbeat-driven plasma frames,
+-- and a profiler attached to each feature so per-system timing flows in
+-- without the user passing a signal. The user separately drives
+-- Feature.Execute on whichever signal they want; the profiler captures
+-- timings transparently wherever Execute is called.
+function Debugger:AutoInitialize(features)
 	assert(type(features) == "table", "AutoInitialize: features must be an array")
 
 	local parent = Instance.new("ScreenGui")
@@ -111,13 +111,12 @@ function Debugger:AutoInitialize(signal, features)
 	self.plasmaNode = self.plasma.new(parent)
 	self.guiParent = parent
 
-	self:AddFeatureGroup(signal, features)
+	self:AddProfiledFeatures(features)
 
-	-- The primary signal drives plasma frames (beginFrame/finishFrame).
-	-- Secondary groups added via AddFeatureGroup profile their features
-	-- but don't drive the UI.
-	local primary = self.featureGroups[1]
-	primary.connection = primary.signal:Connect(function(deltaTime)
+	-- Plasma frame driver. Always Heartbeat; if you need RenderStepped
+	-- specifically, you can fork — but Heartbeat after physics is what
+	-- typical Roblox UIs use and matches the rest of this plugin.
+	self._uiConnection = UI_SIGNAL:Connect(function(deltaTime)
 		self:_tick(deltaTime)
 	end)
 
@@ -132,19 +131,18 @@ function Debugger:AutoInitialize(signal, features)
 	end
 end
 
--- Profile an additional feature group on a different signal. Optional —
--- AutoInitialize wires the primary group; this is for multi-signal games.
-function Debugger:AddFeatureGroup(signal, features)
+-- Attach a profiler to additional features after AutoInitialize. Useful
+-- when features are constructed lazily (e.g., entering a level loads
+-- gameplay features that weren't around at startup).
+function Debugger:AddProfiledFeatures(features)
 	local profiler = DebuggerProfiler.new()
 	local bound = profiler:Bind()
 	for i = 1, #features do
 		features[i]:SetProfiler(bound)
 	end
 	table.insert(self.featureGroups, {
-		signal = signal,
 		features = features,
 		profiler = profiler,
-		connection = nil,
 	})
 end
 
@@ -169,14 +167,15 @@ function Debugger:_tick(deltaTime)
 			return self._eventBridge:connect(...)
 		end)
 		DebuggerUi(self)
+		-- MouseHighlight uses plasma.useState for hover-debounce, so it
+		-- has to run inside the plasma frame, not after finishFrame.
+		if IS_CLIENT then
+			MouseHighlight(self, self._wire)
+		end
 	end)
 	self.plasma.finishFrame(self.plasmaNode)
 
 	self.snapshot:EndFrame()
-
-	if IS_CLIENT then
-		MouseHighlight(self, self._wire)
-	end
 end
 
 function Debugger:_enable()

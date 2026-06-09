@@ -4,7 +4,7 @@ return function(debugger, text)
 	local plasma = debugger.plasma
 	local create = plasma.create
 
-	plasma.widget(function()
+	plasma.scope(function()
 		plasma.useInstance(function()
 			return create("TextLabel", {
 				BackgroundColor3 = Color3.fromRGB(28, 28, 32),
@@ -18,14 +18,12 @@ return function(debugger, text)
 				TextWrapped = true,
 				TextXAlignment = Enum.TextXAlignment.Left,
 				Text = text or "",
-				[create] = {
-					create("UIPadding", {
-						PaddingLeft = UDim.new(0, 6),
-						PaddingRight = UDim.new(0, 6),
-						PaddingTop = UDim.new(0, 4),
-						PaddingBottom = UDim.new(0, 4),
-					}),
-				},
+				create("UIPadding", {
+					PaddingLeft = UDim.new(0, 6),
+					PaddingRight = UDim.new(0, 6),
+					PaddingTop = UDim.new(0, 4),
+					PaddingBottom = UDim.new(0, 4),
+				}),
 			})
 		end)
 	end)

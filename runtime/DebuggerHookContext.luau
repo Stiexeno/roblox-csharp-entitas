@@ -7,7 +7,7 @@
 -- Hook/Unhook are called by Debugger:_enable / :_disable. While
 -- unhooked, Group:GetEntities runs at original cost.
 
-local Group = require(script.Parent.Parent.Group)
+local Group = require(script.Parent.Group)
 local RollingAverage = require(script.Parent.RollingAverage)
 
 local DebuggerHookContext = {}

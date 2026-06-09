@@ -9,7 +9,7 @@ return function(debugger, text, props)
 	local create = plasma.create
 	props = props or {}
 
-	plasma.widget(function()
+	plasma.scope(function()
 		plasma.useInstance(function()
 			local mouse = UserInputService:GetMouseLocation()
 			return create("Frame", {
@@ -20,25 +20,23 @@ return function(debugger, text, props)
 				Size = UDim2.fromOffset(0, 0),
 				AutomaticSize = Enum.AutomaticSize.XY,
 				ZIndex = 100,
-				[create] = {
-					create("UICorner", { CornerRadius = UDim.new(0, 4) }),
-					create("UIPadding", {
-						PaddingLeft = UDim.new(0, 6),
-						PaddingRight = UDim.new(0, 6),
-						PaddingTop = UDim.new(0, 4),
-						PaddingBottom = UDim.new(0, 4),
-					}),
-					create("TextLabel", {
-						BackgroundTransparency = 1,
-						Size = UDim2.fromOffset(0, 0),
-						AutomaticSize = Enum.AutomaticSize.XY,
-						Font = Enum.Font.Gotham,
-						TextSize = 12,
-						TextColor3 = Color3.fromRGB(220, 220, 220),
-						RichText = true,
-						Text = text,
-					}),
-				},
+				create("UICorner", { CornerRadius = UDim.new(0, 4) }),
+				create("UIPadding", {
+					PaddingLeft = UDim.new(0, 6),
+					PaddingRight = UDim.new(0, 6),
+					PaddingTop = UDim.new(0, 4),
+					PaddingBottom = UDim.new(0, 4),
+				}),
+				create("TextLabel", {
+					BackgroundTransparency = 1,
+					Size = UDim2.fromOffset(0, 0),
+					AutomaticSize = Enum.AutomaticSize.XY,
+					Font = Enum.Font.Gotham,
+					TextSize = 12,
+					TextColor3 = Color3.fromRGB(220, 220, 220),
+					RichText = true,
+					Text = text,
+				}),
 			})
 		end)
 	end)

@@ -12,9 +12,13 @@ local connected = false
 
 function ClientBindings.Connect(debugger)
 	if connected then return end
+	local remote = debugger._wire
+	-- No remote when the server never constructed a Debugger (client-only
+	-- debug session). Server-view features no-op in that case; everything
+	-- else (local entity/system inspection) works without the wire.
+	if remote == nil then return end
 	connected = true
 
-	local remote = debugger._wire
 	remote.OnClientEvent:Connect(function(action, ...)
 		local handler = DebuggerEventBridge.clientActions[action]
 		if handler == nil then return end

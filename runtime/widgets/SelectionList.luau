@@ -12,24 +12,22 @@ return function(debugger, items)
 	local rightClickedItem, setRightClickedItem = plasma.useState()
 	local hoveredItem, setHoveredItem = plasma.useState()
 
-	plasma.widget(function()
+	plasma.scope(function()
 		plasma.useInstance(function()
 			return create("Frame", {
 				BackgroundTransparency = 1,
 				Size = UDim2.new(1, 0, 0, 0),
 				AutomaticSize = Enum.AutomaticSize.Y,
-				[create] = {
-					create("UIListLayout", {
-						FillDirection = Enum.FillDirection.Vertical,
-						Padding = UDim.new(0, 2),
-						SortOrder = Enum.SortOrder.LayoutOrder,
-					}),
-				},
+				create("UIListLayout", {
+					FillDirection = Enum.FillDirection.Vertical,
+					Padding = UDim.new(0, 2),
+					SortOrder = Enum.SortOrder.LayoutOrder,
+				}),
 			})
 		end)
 
 		for index, item in ipairs(items) do
-			plasma.widget(function()
+			plasma.scope(function()
 				local row = plasma.useInstance(function(ref)
 					local rowFrame = create("TextButton", {
 						BackgroundColor3 = item.selected and Color3.fromRGB(189, 81, 92) or Color3.fromRGB(40, 40, 46),
@@ -38,19 +36,17 @@ return function(debugger, items)
 						Size = UDim2.new(1, 0, 0, 24),
 						Text = "",
 						AutoButtonColor = false,
-						[create] = {
-							create("UICorner", { CornerRadius = UDim.new(0, 4) }),
-							create("UIListLayout", {
-								FillDirection = Enum.FillDirection.Horizontal,
-								VerticalAlignment = Enum.VerticalAlignment.Center,
-								Padding = UDim.new(0, 6),
-								SortOrder = Enum.SortOrder.LayoutOrder,
-							}),
-							create("UIPadding", {
-								PaddingLeft = UDim.new(0, 8),
-								PaddingRight = UDim.new(0, 8),
-							}),
-						},
+						create("UICorner", { CornerRadius = UDim.new(0, 4) }),
+						create("UIListLayout", {
+							FillDirection = Enum.FillDirection.Horizontal,
+							VerticalAlignment = Enum.VerticalAlignment.Center,
+							Padding = UDim.new(0, 6),
+							SortOrder = Enum.SortOrder.LayoutOrder,
+						}),
+						create("UIPadding", {
+							PaddingLeft = UDim.new(0, 8),
+							PaddingRight = UDim.new(0, 8),
+						}),
 					})
 					ref.row = rowFrame
 
