@@ -69,6 +69,38 @@ public class Bootstrap
 
 Late join is handled by a shared `Ready` RemoteEvent: the client fires it once on first `Subscribe`, the server walks every registered `{Ctx}ServerReplication.Snapshot()` and `FireClient`s the resulting Set ops directly to that one player on the per-context channel. The wire is hand-rolled — no networking plugin dependency.
 
+## Debugger
+
+Runtime ScreenGui debugger — entity inspector, system / feature profiler, group panes, hover-to-highlight — adapted from [matter-ecs/matter](https://github.com/matter-ecs/matter)'s plasma debugger. F4 toggles. Plasma is vendored under the plugin runtime, no extra install.
+
+Wire it on boot, after constructing contexts and features:
+
+```csharp
+using Entities.Debug;
+
+public class Bootstrap
+{
+    public void Start()
+    {
+        var contexts = new Contexts();
+        Contexts.sharedInstance = contexts;
+
+        var gameFeature = new GameFeature(contexts);  // your Feature subclass
+        // …drive gameFeature.Execute on whichever signal you use (Heartbeat, RenderStepped, …)
+
+        var debugger = new Debugger();
+        debugger.AttachContext(contexts.game, GameComponentsLookup.componentNames);
+        debugger.AutoInitialize(new Feature[] { gameFeature });
+    }
+}
+```
+
+`AttachContext` is required per context for entity / component visibility — pass the codegen-emitted `{Ctx}ComponentsLookup.componentNames` so the UI can label component rows. `AutoInitialize` installs the ScreenGui, the F4 binding (client only), and attaches a per-system profiler to each feature so timings flow without you wiring a signal — you keep driving `Feature.Execute` on whatever signal you already use, and the profiler captures wherever it's called. Use `AddProfiledFeatures(...)` for features constructed lazily (e.g., level-load adds features after the initial wire). `Show()` / `Hide()` / `Toggle()` are client-only and equivalent to F4. `RegisterSystemName(typeof(MySystem), "MySystem")` overrides debug.info-based names when source attribution is ambiguous (generic systems generated from a shared module).
+
+### Server view
+
+To inspect server-side entities and systems, construct a `Debugger` on the server too (same `AttachContext` + `AutoInitialize` pattern with the server's features) and call `debugger.SwitchToServerView()` on the client. A per-context RemoteEvent bridges entity / component / profiler snapshots. Outside Studio, server connections are gated — the server-side instance rejects every player unless an `authorize(player) → bool` hook is set; see `runtime/Debugger.luau` for the gate.
+
 ## Status
 
 Alpha.
@@ -88,6 +120,7 @@ Alpha.
 - `[Watched]` — class-level. Synthesizes a `{Name}Changed` flag component, patches state-mutating entity bodies to raise it on Add / Replace / setter (flag flip in either direction), and emits a `{Ctx}WatchedCleanupSystem` you add to the tail of your feature pipeline. Reactive systems gate on `GameMatcher.AllOf(GameMatcher.Health, GameMatcher.HealthChanged)` — no polling cache needed. Local-only signal; composes naturally with `[Replicated]` since the client's `Apply{X}` calls `Replace{X}` which raises Changed locally too
 - Direct `foreach (var e in group)` via `IGroup<T>:__iter` (no `.GetEntities()` needed)
 - `Entity.Destroy()` is virtual; codegen-emitted `{Ctx}Entity` override pre-fires `RemoveX` (or `IsX = false`) on every hooked component before base teardown, so direct destroy keeps `[Replicated]`, `[Unique]`, and `[EntityIndex]` state consistent
+- Visual debugger — ScreenGui-based, plasma-driven, F4-toggled (see [Debugger](#debugger))
 
 ### Left to do
 
@@ -95,7 +128,6 @@ Alpha.
 - Client prediction + reconciliation — `serverTick` is on the wire now; the rest of the prediction stack (speculative state, rollback) isn't
 - Snapshot delta compression — pagination handles payload size, but every Ready ping still sends the full world. A "what's changed since last seen" pass would cut bandwidth on reconnect
 - Buffer-typed wire — built and reverted: the wire is intentionally Lua-table-shaped (`{opcode, componentIndex, entityId, ...fields}`) so components can carry `Vector3`, `Color3`, `Instance` refs, `CFrame`, and arbitrary custom objects without per-type pack/unpack code. Binary `buffer` packing is the obvious optimization if profiling ever shows the wire is a bottleneck, but it forces a closed type system (every field type needs a schema entry + read/write helper) which loses Roblox's native marshaling for free. Worth ~3–5× bandwidth + zero-alloc server pack when you actually need it; for personal-scale Roblox games the table wire is fine
-- Visual debugger
 - Group lifecycle hooks (`OnEntityAdded` / `OnEntityRemoved`) — useful for reactive systems if/when that pattern lands
 
 ### Internal optimizations
