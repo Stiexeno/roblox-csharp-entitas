@@ -23,6 +23,19 @@ function Context:constructor(totalComponents)
 	self._groupsByIndex = {}        -- componentIndex → array of groups interested in that index
 	self._creationIndex = 0
 	self._entitiesCache = nil
+	-- Debugger hook. Nil unless AddDebugListener has been called; checked
+	-- once on each mutation path so a no-debugger context pays one nil
+	-- compare per Initialize / Destroy / NotifyComponentChanged.
+	-- onComponentChanged receives (entity, index, component); component=nil
+	-- means removal (the same wire as the group-notification path).
+	self._debugListeners = nil
+end
+
+function Context:AddDebugListener(listener)
+	if self._debugListeners == nil then
+		self._debugListeners = {}
+	end
+	table.insert(self._debugListeners, listener)
 end
 
 -- Drops every component sitting on the pool stack for a single index.
@@ -80,6 +93,14 @@ function Context:Initialize(entity)
 	self._entities[entity] = true
 	self._count = self._count + 1
 	self._entitiesCache = nil
+
+	local listeners = self._debugListeners
+	if listeners ~= nil then
+		for i = 1, #listeners do
+			local l = listeners[i]
+			if l.onCreated ~= nil then l.onCreated(entity) end
+		end
+	end
 end
 
 -- Internal callback Entity:Destroy fires. Pulls the entity out of the
@@ -90,6 +111,14 @@ function Context:_OnEntityDestroyed(entity)
 	self._count = self._count - 1
 	self._entitiesCache = nil
 	table.insert(self._reusableEntities, entity)
+
+	local listeners = self._debugListeners
+	if listeners ~= nil then
+		for i = 1, #listeners do
+			local l = listeners[i]
+			if l.onDestroyed ~= nil then l.onDestroyed(entity) end
+		end
+	end
 end
 
 function Context:HasEntity(entity) return self._entities[entity] == true end
@@ -165,9 +194,20 @@ end
 -- index — see GetGroup for the registration shape.
 function Context:NotifyComponentChanged(entity, index, component)
 	local interested = self._groupsByIndex[index]
-	if interested == nil then return end
-	for i = 1, #interested do
-		interested[i]:HandleEntity(entity, index, component)
+	if interested ~= nil then
+		for i = 1, #interested do
+			interested[i]:HandleEntity(entity, index, component)
+		end
+	end
+
+	local listeners = self._debugListeners
+	if listeners ~= nil then
+		for i = 1, #listeners do
+			local l = listeners[i]
+			if l.onComponentChanged ~= nil then
+				l.onComponentChanged(entity, index, component)
+			end
+		end
 	end
 end
 

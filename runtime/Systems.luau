@@ -15,6 +15,16 @@ function Systems:constructor()
 	self._executeSystems = {}
 	self._cleanupSystems = {}
 	self._tearDownSystems = {}
+	-- Optional debugger hook. When set, each per-system phase call goes
+	-- through profiler(system, phaseName) instead of the direct dispatch.
+	-- The profiler closes over its own timing + skip logic; we just hand it
+	-- the system + the phase to invoke. Nil-checked once per phase loop so
+	-- the no-debugger path branches once, not per system.
+	self._profiler = nil
+end
+
+function Systems:SetProfiler(fn)
+	self._profiler = fn
 end
 
 function Systems:Add(system)
@@ -29,19 +39,43 @@ function Systems:Add(system)
 end
 
 function Systems:Initialize()
-	for i = 1, #self._initializeSystems do self._initializeSystems[i]:Initialize() end
+	local profiler = self._profiler
+	local list = self._initializeSystems
+	if profiler == nil then
+		for i = 1, #list do list[i]:Initialize() end
+	else
+		for i = 1, #list do profiler(list[i], "Initialize") end
+	end
 end
 
 function Systems:Execute()
-	for i = 1, #self._executeSystems do self._executeSystems[i]:Execute() end
+	local profiler = self._profiler
+	local list = self._executeSystems
+	if profiler == nil then
+		for i = 1, #list do list[i]:Execute() end
+	else
+		for i = 1, #list do profiler(list[i], "Execute") end
+	end
 end
 
 function Systems:Cleanup()
-	for i = 1, #self._cleanupSystems do self._cleanupSystems[i]:Cleanup() end
+	local profiler = self._profiler
+	local list = self._cleanupSystems
+	if profiler == nil then
+		for i = 1, #list do list[i]:Cleanup() end
+	else
+		for i = 1, #list do profiler(list[i], "Cleanup") end
+	end
 end
 
 function Systems:TearDown()
-	for i = 1, #self._tearDownSystems do self._tearDownSystems[i]:TearDown() end
+	local profiler = self._profiler
+	local list = self._tearDownSystems
+	if profiler == nil then
+		for i = 1, #list do list[i]:TearDown() end
+	else
+		for i = 1, #list do profiler(list[i], "TearDown") end
+	end
 end
 
 return Systems
