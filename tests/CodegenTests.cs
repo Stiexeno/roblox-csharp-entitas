@@ -709,12 +709,19 @@ namespace G { [Game] public class Pos : IComponent { public int X; public int Y;
 		{
 			// For value components the dispatch checks HasX and routes to
 			// Replace if present, Add otherwise — makes server re-sends
-			// idempotent (late join, re-sync, etc.).
+			// idempotent (late join, re-sync, etc.). With delta encoding,
+			// the args come from a bitmask-driven walk: bit 0 set → take
+			// new value from op[4], else read the existing field from the
+			// local component.
 			TestHarness.Project p = Run(nameof(ClientReplication_ApplySet_Value_PicksReplaceOrAddByHasX), OneReplicatedHealth);
 			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
 			Assert.Contains("if (compIndex == GameComponentsLookup.Health)", mirror);
-			Assert.Contains("if (e.HasHealth) e.ReplaceHealth((int)op[3]);", mirror);
-			Assert.Contains("else e.AddHealth((int)op[3]);", mirror);
+			Assert.Contains("int bitmask = (int)op[3];", mirror);
+			Assert.Contains("(bitmask & 1) != 0", mirror);
+			Assert.Contains("? (int)op[payloadIdx++]", mirror);
+			Assert.Contains(": (e.HasHealth ? e.Health : default(int));", mirror);
+			Assert.Contains("if (e.HasHealth) e.ReplaceHealth(v0);", mirror);
+			Assert.Contains("else e.AddHealth(v0);", mirror);
 		}
 
 		[Fact]
@@ -776,30 +783,34 @@ namespace G { [Game] public class Pos : IComponent { public int X; public int Y;
 		public void ServerReplication_Snapshot_ValueComponent_EmitsSetOpWithUnwrappedField()
 		{
 			// Single-Value field uses the entity's unwrapped accessor
-			// (e.Health), matching how the tick-time Set op carries the value.
+			// (e.Health). Snapshot ops always carry the all-ones bitmask
+			// — the joining client has no local state for this entity,
+			// so every field has to land in the apply path.
 			TestHarness.Project p = Run(nameof(ServerReplication_Snapshot_ValueComponent_EmitsSetOpWithUnwrappedField), OneReplicatedHealth);
 			string server = TestHarness.ReadGenerated(p, "GameServerReplication.cs");
 			Assert.Contains("private object[] Snapshot()", server);
 			Assert.Contains("GameEntity[] entities = _context.GetEntities();", server);
 			Assert.Contains("if (e.HasHealth)", server);
-			Assert.Contains("ops.Add(new object[] { 0, GameComponentsLookup.Health, e.creationIndex, e.Health });", server);
+			Assert.Contains("ops.Add(new object[] { 0, GameComponentsLookup.Health, e.creationIndex, 1, e.Health });", server);
 		}
 
 		[Fact]
 		public void ServerReplication_Snapshot_FlagComponent_EmitsSetOpWithoutFields()
 		{
+			// Flag op carries bitmask = 0 (no fields). Uniform shape with
+			// tick-time flag Sets keeps the client decoder branch-free.
 			TestHarness.Project p = Run(nameof(ServerReplication_Snapshot_FlagComponent_EmitsSetOpWithoutFields), OneReplicatedFlag);
 			string server = TestHarness.ReadGenerated(p, "GameServerReplication.cs");
 			Assert.Contains("if (e.IsStunned)", server);
-			Assert.Contains("ops.Add(new object[] { 0, GameComponentsLookup.Stunned, e.creationIndex });", server);
+			Assert.Contains("ops.Add(new object[] { 0, GameComponentsLookup.Stunned, e.creationIndex, 0 });", server);
 		}
 
 		[Fact]
 		public void ServerReplication_Snapshot_MultiFieldComponent_UnpacksAllFields()
 		{
 			// Multi-field component → pull the component instance, then
-			// unpack each field positionally so the wire shape matches the
-			// tick-time Set (which uses `new{Field}` named args).
+			// unpack each field positionally. Snapshot bitmask is
+			// (1 << fieldCount) - 1 = 3 for a 2-field component.
 			string source = @"
 using Entities;
 using Entities.CodeGeneration.Attributes;
@@ -808,7 +819,7 @@ namespace G { [Game, Replicated] public class Pos : IComponent { public int X; p
 			string server = TestHarness.ReadGenerated(p, "GameServerReplication.cs");
 			Assert.Contains("if (e.HasPos)", server);
 			Assert.Contains("global::G.Pos comp = e.Pos;", server);
-			Assert.Contains("ops.Add(new object[] { 0, GameComponentsLookup.Pos, e.creationIndex, comp.X, comp.Y });", server);
+			Assert.Contains("ops.Add(new object[] { 0, GameComponentsLookup.Pos, e.creationIndex, 3, comp.X, comp.Y });", server);
 		}
 
 		[Fact]
@@ -1529,6 +1540,58 @@ namespace G {
 			TestHarness.Project p = Run(nameof(ClientReplication_SubscribeForwardsDigest), OneReplicatedHealth);
 			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
 			Assert.Contains("EntitiesReplication.Subscribe(\"Game\", GameComponentsLookup.BuildDigest, OnOps);", mirror);
+		}
+
+		// ----------------------------------------------------------------
+		// Delta-encoded ApplySet — bitmask walks each field, takes the
+		// new value from the payload when the bit is set, else reads the
+		// existing field from the local frozen-clone component. Server
+		// guarantees first-Set / Add always carries all-ones, so a non-
+		// all-ones bitmask implies the client already Has{X}.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void ClientReplication_ApplySet_MultiField_ReconstructsFromBitmask()
+		{
+			// Two-field Pos: bit 0 selects X, bit 1 selects Y. Each field
+			// emits a ternary: bit set → take new from op[payloadIdx++],
+			// else read local e.Pos.{Field}. The payloadIdx walk packs
+			// changed fields densely in the op tail.
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game, Replicated] public class Pos : IComponent { public int X; public int Y; } }";
+			TestHarness.Project p = Run(nameof(ClientReplication_ApplySet_MultiField_ReconstructsFromBitmask), source);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
+			Assert.Contains("int bitmask = (int)op[3];", mirror);
+			Assert.Contains("int payloadIdx = 4;", mirror);
+			// Field 0 (X) → bit 1
+			Assert.Contains("(bitmask & 1) != 0", mirror);
+			Assert.Contains(": (e.HasPos ? e.Pos.X : default(int));", mirror);
+			// Field 1 (Y) → bit 2
+			Assert.Contains("(bitmask & 2) != 0", mirror);
+			Assert.Contains(": (e.HasPos ? e.Pos.Y : default(int));", mirror);
+			// Final call uses the reconstructed locals, not raw op indices.
+			Assert.Contains("if (e.HasPos) e.ReplacePos(v0, v1);", mirror);
+			Assert.Contains("else e.AddPos(v0, v1);", mirror);
+		}
+
+		[Fact]
+		public void ClientReplication_ApplySet_Flag_IgnoresBitmask()
+		{
+			// Flag carries bitmask = 0 on the wire but the client code
+			// doesn't need to decode anything — Is{X} = true is the
+			// whole op.
+			TestHarness.Project p = Run(nameof(ClientReplication_ApplySet_Flag_IgnoresBitmask), OneReplicatedFlag);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
+			Assert.Contains("if (compIndex == GameComponentsLookup.Stunned)", mirror);
+			Assert.Contains("e.IsStunned = true;", mirror);
+			// Flag branch must not introduce delta scaffolding.
+			int flagBlockIdx = mirror.IndexOf("if (compIndex == GameComponentsLookup.Stunned)", StringComparison.Ordinal);
+			int returnIdx = mirror.IndexOf("return;", flagBlockIdx, StringComparison.Ordinal);
+			string flagBlock = mirror.Substring(flagBlockIdx, returnIdx - flagBlockIdx);
+			Assert.DoesNotContain("bitmask", flagBlock);
+			Assert.DoesNotContain("payloadIdx", flagBlock);
 		}
 	}
 }

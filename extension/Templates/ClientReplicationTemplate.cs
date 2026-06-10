@@ -18,8 +18,12 @@ namespace RobloxCSharp.Extensions.Entities
 	// order, so the client's Add/Replace decision is stable.
 	//
 	// Wire op shape (matches EntitiesReplication.luau):
-	//   {opcode, componentIndex, entityId, ...fields}
-	//   opcode 0 = Set, opcode 1 = Remove
+	//   Set:    {0, componentIndex, entityId, bitmask, ...changedFields}
+	//   Remove: {1, componentIndex, entityId}
+	// Bitmask tells us which positions in the changedFields tail hold
+	// new values; positions whose bit is zero are unchanged and read
+	// from the local component (frozen-clone safe — see Entity.luau's
+	// GetReplicatedComponent).
 	internal static class ClientReplicationTemplate
 	{
 		public static string Emit(ContextModel ctx, List<ComponentModel> replicated)
@@ -81,6 +85,12 @@ namespace RobloxCSharp.Extensions.Entities
 			// Set dispatch — choose Add vs Replace by HasX so the user
 			// sees idempotent application of a re-sent op (the server can
 			// resend on late join / re-sync without the client desyncing).
+			// Per-component reconstruction: walk bits, pull new values
+			// from op[4..] where the bit is set, fall back to the local
+			// component's field where it's zero. The local read assumes
+			// HasX — true whenever the bitmask isn't all-ones (server
+			// guarantees: first-Set / Add always sends all-ones), but we
+			// still guard with the default fallback for defense in depth.
 			sb.AppendLine($"\tprivate void ApplySet(int compIndex, {entityType} e, object[] op)");
 			sb.AppendLine("\t{");
 			foreach (ComponentModel c in replicated)
@@ -89,17 +99,37 @@ namespace RobloxCSharp.Extensions.Entities
 				sb.AppendLine("\t\t{");
 				if (c.IsFlag)
 				{
+					// Flag: bitmask is 0, unused. Server only emits flag
+					// Sets when the flag isn't already on (baseline check),
+					// so this is effectively an Add — but Is{X}=true is
+					// idempotent so a stale re-send is safe.
 					sb.AppendLine($"\t\t\te.Is{c.TypeName} = true;");
 				}
 				else
 				{
+					sb.AppendLine("\t\t\tint bitmask = (int)op[3];");
+					sb.AppendLine("\t\t\tint payloadIdx = 4;");
+
+					bool unwrap = c.Fields.Count == 1 && c.Fields[0].Name == "Value";
 					List<string> argList = new();
+
 					for (int i = 0; i < c.Fields.Count; i++)
 					{
 						ComponentField f = c.Fields[i];
-						// op[3] is first field, op[4] is second, etc.
-						argList.Add($"({f.TypeFullName})op[{3 + i}]");
+						int bit = 1 << i;
+						string local = unwrap
+							? $"e.{c.TypeName}"
+							: $"e.{c.TypeName}.{f.Name}";
+						// `e.{TypeName}` for unwrap returns the primitive
+						// (frozen-clone path doesn't apply); for multi-
+						// field it returns the frozen clone, then .Field
+						// reads through the freeze.
+						sb.AppendLine($"\t\t\t{f.TypeFullName} v{i} = (bitmask & {bit}) != 0");
+						sb.AppendLine($"\t\t\t\t? ({f.TypeFullName})op[payloadIdx++]");
+						sb.AppendLine($"\t\t\t\t: (e.Has{c.TypeName} ? {local} : default({f.TypeFullName}));");
+						argList.Add($"v{i}");
 					}
+
 					string args = string.Join(", ", argList);
 					sb.AppendLine($"\t\t\tif (e.Has{c.TypeName}) e.Replace{c.TypeName}({args});");
 					sb.AppendLine($"\t\t\telse e.Add{c.TypeName}({args});");

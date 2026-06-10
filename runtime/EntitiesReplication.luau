@@ -2,9 +2,12 @@
 -- ReplicatedStorage.Plugins.Entities.<Context>Replication). Every fire
 -- carries a monotonic server tick + an array of ops:
 --   ev:FireAllClients(tick, ops)
---   each op = {opcode, componentIndex, entityId, ...fields}
---   opcode 0 = Set (covers Added + Replaced; client decides AddX vs
---   ReplaceX by HasX). Opcode 1 = Remove.
+--   Set:    {0, componentIndex, entityId, bitmask, ...changedFields}
+--   Remove: {1, componentIndex, entityId}
+-- Bitmask is a Lua number; bit i-1 set means field i is present in the
+-- changedFields tail (in field-declaration order). For a flag component
+-- the bitmask is 0 and no fields follow. Client distinguishes Add vs
+-- Replace by HasX. See QueueSet for the diff/baseline mechanics.
 --
 -- Server:
 --   • Per-context monotonic tick increments on every Heartbeat
@@ -71,6 +74,7 @@ EntitiesReplication._readyConnected = false  -- server: OnServerEvent wired
 EntitiesReplication._readyFiredFor = {}      -- client: contextName -> true (fired once per context)
 EntitiesReplication._digests = {}            -- contextName -> string (server: expected client digest)
 EntitiesReplication._pendingSnapshots = {}   -- server: array of {player, contextName} queued by Ready ping, drained next heartbeat
+EntitiesReplication._baselines = {}          -- server: contextName -> entityId -> componentIndex -> {lastSentField1, lastSentField2, ...}
 
 -- Plugins/Entities folder where every per-context RemoteEvent lives.
 -- Server lazy-creates it on first QueueSet; client lazy-waits on first
@@ -277,15 +281,97 @@ end
 -- Set op (Add + Replace collapse to one wire shape; client distinguishes
 -- by HasX). Variadic over the field values — the C# stub exposes 0..6
 -- explicit-arity overloads, all of which lower to this single function.
+--
+-- Delta encoding: we keep a per-(context, entity, component) baseline of
+-- the field values we last broadcast. On each call we diff incoming
+-- fields against the baseline, build a bitmask of changed positions
+-- (field i → bit i-1), and ship only those positions on the wire. The
+-- client reconstructs the full tuple from its local component for the
+-- positions the bitmask zeros out.
+--   • prior nil (first Set, or after a Remove) → all-ones bitmask, every
+--     field sent. Establishes the baseline.
+--   • bitmask = 0 (every field equals baseline) → idempotent skip. Saves
+--     bandwidth on reactive systems that re-fire Replace{X} with the
+--     same values.
+--   • flag components (fieldCount == 0) skip the bitmask path entirely;
+--     prior-nil emits the op, prior-present skips it.
+-- 32-field cap on multi-field components (single Lua-number bitmask) —
+-- not enforced; if you push past that the math.floor(2^32) starts losing
+-- precision and you'll see spurious "unchanged" reads.
 function EntitiesReplication.QueueSet(contextName, componentIndex, entityId, ...)
 	if not EntitiesReplication._isServer then return end
-	local op = {0, componentIndex, entityId, ...}
+
+	local fieldCount = select("#", ...)
+
+	local ctxBase = EntitiesReplication._baselines[contextName]
+	if ctxBase == nil then
+		ctxBase = {}
+		EntitiesReplication._baselines[contextName] = ctxBase
+	end
+	local entBase = ctxBase[entityId]
+	if entBase == nil then
+		entBase = {}
+		ctxBase[entityId] = entBase
+	end
+	local prior = entBase[componentIndex]
+
+	if fieldCount == 0 then
+		-- Flag: nothing to diff. Skip if the wire already carries this
+		-- flag-presence; emit + sentinel if not.
+		if prior ~= nil then return end
+		entBase[componentIndex] = {}
+		table.insert(bufferFor(contextName), { 0, componentIndex, entityId, 0 })
+		return
+	end
+
+	local newFields = { ... }
+	local bitmask = 0
+	local delta = {}
+
+	if prior == nil then
+		-- First send for this component-on-entity. Every field is "new".
+		for i = 1, fieldCount do
+			bitmask = bit32.bor(bitmask, bit32.lshift(1, i - 1))
+			delta[i] = newFields[i]
+		end
+	else
+		local deltaIdx = 0
+		for i = 1, fieldCount do
+			if prior[i] ~= newFields[i] then
+				bitmask = bit32.bor(bitmask, bit32.lshift(1, i - 1))
+				deltaIdx = deltaIdx + 1
+				delta[deltaIdx] = newFields[i]
+			end
+		end
+		if bitmask == 0 then return end
+	end
+
+	entBase[componentIndex] = newFields
+
+	local op = { 0, componentIndex, entityId, bitmask }
+	for i = 1, #delta do
+		op[#op + 1] = delta[i]
+	end
 	table.insert(bufferFor(contextName), op)
 end
 
 function EntitiesReplication.QueueRemove(contextName, componentIndex, entityId)
 	if not EntitiesReplication._isServer then return end
-	table.insert(bufferFor(contextName), {1, componentIndex, entityId})
+	-- Drop the baseline so a future re-add starts fresh (all-ones
+	-- bitmask). Also collapse the entity-level table when it empties out
+	-- so a long-running game doesn't accumulate stale entityId keys for
+	-- entities that have been fully torn down.
+	local ctxBase = EntitiesReplication._baselines[contextName]
+	if ctxBase ~= nil then
+		local entBase = ctxBase[entityId]
+		if entBase ~= nil then
+			entBase[componentIndex] = nil
+			if next(entBase) == nil then
+				ctxBase[entityId] = nil
+			end
+		end
+	end
+	table.insert(bufferFor(contextName), { 1, componentIndex, entityId })
 end
 
 -- Client-side single subscription point. The codegen-emitted

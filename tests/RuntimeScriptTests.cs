@@ -119,6 +119,106 @@ namespace Entities.Tests
 			Assert.True(reset < loop, "_pendingSnapshots must be zeroed before iterating");
 		}
 
+		// ----------------------------------------------------------------
+		// Delta encoding — QueueSet diffs new fields against the per-
+		// (context, entity, component) baseline, ships only changed
+		// positions tagged with a bitmask. QueueRemove clears the
+		// baseline so a future re-add starts fresh.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void Delta_BaselinesTableIsDeclared()
+		{
+			string src = ReadRuntime("EntitiesReplication.luau");
+			Assert.Contains("EntitiesReplication._baselines = {}", src);
+		}
+
+		[Fact]
+		public void Delta_QueueSet_FirstSendEmitsAllOnesBitmask()
+		{
+			// `prior == nil` branch: every field is "changed" because
+			// there's no baseline yet, so bitmask gets every bit set and
+			// every field flows into the delta tail.
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.QueueSet(contextName, componentIndex, entityId, ...)",
+				"\nend");
+			Assert.Contains("if prior == nil then", body);
+			Assert.Contains("bit32.bor(bitmask, bit32.lshift(1, i - 1))", body);
+		}
+
+		[Fact]
+		public void Delta_QueueSet_IdempotentSkip_WhenBitmaskIsZero()
+		{
+			// All fields equal baseline → bitmask stays 0 → skip the
+			// enqueue entirely. Saves bandwidth on reactive systems that
+			// re-fire Replace{X} with unchanged values.
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.QueueSet(contextName, componentIndex, entityId, ...)",
+				"\nend");
+			Assert.Contains("if bitmask == 0 then return end", body);
+		}
+
+		[Fact]
+		public void Delta_QueueSet_FlagShortCircuits()
+		{
+			// Flag (fieldCount == 0) bypasses the bitmask path entirely —
+			// prior-nil emits the op, prior-present skips. Wire shape is
+			// {0, ci, eid, 0} (bitmask = 0).
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.QueueSet(contextName, componentIndex, entityId, ...)",
+				"\nend");
+			Assert.Contains("if fieldCount == 0 then", body);
+			Assert.Contains("{ 0, componentIndex, entityId, 0 }", body);
+		}
+
+		[Fact]
+		public void Delta_QueueSet_UpdatesBaselineAfterEmit()
+		{
+			// Baseline update must happen *after* the diff (we still need
+			// to compare against the prior value) and *before* the
+			// table.insert (so a callback firing on the same frame sees
+			// the new baseline). Order matters here.
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.QueueSet(contextName, componentIndex, entityId, ...)",
+				"\nend");
+			int baselineWrite = body.IndexOf("entBase[componentIndex] = newFields", System.StringComparison.Ordinal);
+			int tableInsert = body.LastIndexOf("table.insert(bufferFor(contextName), op)", System.StringComparison.Ordinal);
+			Assert.True(baselineWrite > 0 && tableInsert > 0);
+			Assert.True(baselineWrite < tableInsert,
+				"Baseline must be updated before the op is pushed.");
+		}
+
+		[Fact]
+		public void Delta_QueueRemove_ClearsBaselineEntry()
+		{
+			// Remove drops the per-component baseline so a future re-add
+			// of the same component on the same entity starts fresh
+			// (first-send branch → all-ones bitmask).
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.QueueRemove(contextName, componentIndex, entityId)",
+				"\nend");
+			Assert.Contains("entBase[componentIndex] = nil", body);
+		}
+
+		[Fact]
+		public void Delta_QueueRemove_CollapsesEmptyEntityBaseline()
+		{
+			// Long-running games accumulate stale entityId keys for fully
+			// torn-down entities unless we collapse the entity-level
+			// table once it empties.
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.QueueRemove(contextName, componentIndex, entityId)",
+				"\nend");
+			Assert.Contains("if next(entBase) == nil then", body);
+			Assert.Contains("ctxBase[entityId] = nil", body);
+		}
+
 		private static string ExtractBetween(string src, string startToken, string endToken)
 		{
 			int start = src.IndexOf(startToken, System.StringComparison.Ordinal);

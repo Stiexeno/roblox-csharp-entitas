@@ -58,28 +58,36 @@ namespace RobloxCSharp.Extensions.Entities
 				string lookup = $"{ctx.Name}ComponentsLookup.{c.TypeName}";
 				if (c.IsFlag)
 				{
+					// Flag: no fields, bitmask = 0. Same wire shape as tick-
+					// time Set for flags.
 					sb.AppendLine($"\t\t\tif (e.Is{c.TypeName})");
-					sb.AppendLine($"\t\t\t\tops.Add(new object[] {{ 0, {lookup}, e.creationIndex }});");
+					sb.AppendLine($"\t\t\t\tops.Add(new object[] {{ 0, {lookup}, e.creationIndex, 0 }});");
 				}
 				else
 				{
+					// Snapshot ops always carry the all-ones bitmask — the
+					// joining client has no local state for this entity yet
+					// (we just created it via GetOrCreate), so every field
+					// has to land in the apply path. The bitmask gives the
+					// client's delta-decoder a uniform shape across snapshot
+					// and tick batches.
+					int allOnes = (1 << c.Fields.Count) - 1;
 					bool unwrap = c.Fields.Count == 1 && c.Fields[0].Name == "Value";
 					sb.AppendLine($"\t\t\tif (e.Has{c.TypeName})");
 					sb.AppendLine("\t\t\t{");
 					if (unwrap)
 					{
-						// Single Value field → the entity exposes the unwrapped
-						// value directly via e.{TypeName}, same shape as the
-						// tick-time Set op.
-						sb.AppendLine($"\t\t\t\tops.Add(new object[] {{ 0, {lookup}, e.creationIndex, e.{c.TypeName} }});");
+						// Single Value field → unwrapped accessor reads
+						// straight to the primitive.
+						sb.AppendLine($"\t\t\t\tops.Add(new object[] {{ 0, {lookup}, e.creationIndex, {allOnes}, e.{c.TypeName} }});");
 					}
 					else
 					{
-						// Multi-field or single non-Value → pull the component
-						// instance, then unpack each field positionally.
+						// Multi-field → pull the component instance, then
+						// unpack each field positionally.
 						sb.AppendLine($"\t\t\t\t{c.FullName} comp = e.{c.TypeName};");
 						string fieldArgs = string.Join(", ", c.Fields.Select(f => $"comp.{f.Name}"));
-						sb.AppendLine($"\t\t\t\tops.Add(new object[] {{ 0, {lookup}, e.creationIndex, {fieldArgs} }});");
+						sb.AppendLine($"\t\t\t\tops.Add(new object[] {{ 0, {lookup}, e.creationIndex, {allOnes}, {fieldArgs} }});");
 					}
 					sb.AppendLine("\t\t\t}");
 				}
