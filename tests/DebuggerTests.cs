@@ -214,10 +214,14 @@ namespace Entities.Tests
 		[Fact]
 		public void DebuggerWire_UsesPluginsEntitiesNamespace()
 		{
+			// Remote is named "DebuggerRemote" (not "Debugger") because the
+			// runtime ships a sibling ModuleScript named Debugger at
+			// Plugins.Entities.Debugger — WaitForChild("Debugger") would
+			// resolve to the module, not the event.
 			string s = Read(RuntimeFile("DebuggerWire.luau"));
 			Assert.Contains("WaitForChild(\"Plugins\")", s);
 			Assert.Contains("WaitForChild(\"Entities\")", s);
-			Assert.Contains("REMOTE_NAME = \"Debugger\"", s);
+			Assert.Contains("REMOTE_NAME = \"DebuggerRemote\"", s);
 		}
 
 		[Fact]

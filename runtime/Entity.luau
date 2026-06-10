@@ -101,6 +101,20 @@ function Entity:GetComponent(index)
 	return c
 end
 
+-- Replicated multi-field getter. Hands back a frozen shallow clone so
+-- user code can't bypass Replace{X} by mutating the live component
+-- table in place (`e.Position.X = 5`). The pool stays unfrozen — only
+-- the snapshot we hand out is frozen, so the next Replace{X} recycles
+-- a clean instance normally. Caller pays one table.clone per Get, but
+-- only for replicated components routed through here by codegen.
+function Entity:GetReplicatedComponent(index)
+	local c = self._components[index]
+	if c == nil then
+		error("Entity does not have component at index " .. tostring(index) .. ".")
+	end
+	return table.freeze(table.clone(c))
+end
+
 function Entity:GetComponents()
 	local result = {}
 	for _, c in pairs(self._components) do

@@ -45,9 +45,19 @@ namespace Entities
 		// Subscribe a client-side handler. Called by the codegen-emitted
 		// {Ctx}ClientReplication ctor exactly once per context. Handler
 		// signature is `(ops)` where `ops` is the array decoded above.
-		// First Subscribe on a client also fires the shared Ready event so
-		// the server can dispatch a late-join snapshot back.
-		public extern static void Subscribe(string contextName, object handler);
+		// First Subscribe per context fires the Ready event with the
+		// client's BuildDigest so the server can validate that the two
+		// sides agree on componentIndex ↔ type mapping before dispatching
+		// a late-join snapshot.
+		public extern static void Subscribe(string contextName, string buildDigest, object handler);
+
+		// Server-only. Registers the expected client BuildDigest for a
+		// context. Called by the codegen-emitted {Ctx}ServerReplication
+		// ctor with {Ctx}ComponentsLookup.BuildDigest. A Ready ping that
+		// carries a mismatching digest kicks the player — a hard-fail
+		// safeguard against a client whose component layout drifted from
+		// the server's build (rename, add, reorder).
+		public extern static void RegisterDigest(string contextName, string buildDigest);
 
 		// Server-only. Registers a per-context callable that returns the
 		// snapshot ops array (every replicated component on every live

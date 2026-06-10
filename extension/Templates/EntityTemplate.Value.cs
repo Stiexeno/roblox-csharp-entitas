@@ -100,7 +100,15 @@ namespace RobloxCSharp.Extensions.Entities
 			}
 			else
 			{
-				sb.AppendLine($"\tpublic {c.FullName} {c.TypeName} {{ get {{ return ({c.FullName})GetComponent({lookup}); }} }}");
+				// Replicated multi-field components route through
+				// GetReplicatedComponent so the returned instance is
+				// frozen — direct field mutation throws instead of
+				// silently desyncing the client (the replication wire
+				// only fires on Replace{X}, not on in-place mutation).
+				// Non-replicated components stay on GetComponent to
+				// avoid the per-Get clone allocation.
+				string getter = c.IsReplicated ? "GetReplicatedComponent" : "GetComponent";
+				sb.AppendLine($"\tpublic {c.FullName} {c.TypeName} {{ get {{ return ({c.FullName}){getter}({lookup}); }} }}");
 			}
 			sb.AppendLine($"\tpublic bool Has{c.TypeName} {{ get {{ return HasComponent({lookup}); }} }}");
 

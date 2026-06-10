@@ -601,6 +601,42 @@ namespace G {
 			Assert.Contains("if (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueRemove(", entity);
 		}
 
+		[Fact]
+		public void Replicated_MultiField_Getter_RoutesThroughGetReplicatedComponent()
+		{
+			// Multi-field [Replicated] components hand back a frozen clone
+			// via GetReplicatedComponent so direct field mutation
+			// (`e.Pos.X = 5`) throws instead of silently desyncing — the
+			// replication wire only fires on Replace{X}, not on in-place
+			// mutation. Single-Value-field components stay safe because
+			// the getter returns a primitive copy.
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game, Replicated] public class Pos : IComponent { public int X; public int Y; } }";
+			TestHarness.Project p = Run(nameof(Replicated_MultiField_Getter_RoutesThroughGetReplicatedComponent), source);
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Pos.cs");
+			Assert.Contains("get { return (global::G.Pos)GetReplicatedComponent(GameComponentsLookup.Pos); }", entity);
+			Assert.DoesNotContain("get { return (global::G.Pos)GetComponent(GameComponentsLookup.Pos); }", entity);
+		}
+
+		[Fact]
+		public void NonReplicated_MultiField_Getter_StaysOnGetComponent()
+		{
+			// Non-replicated multi-field components keep the zero-overhead
+			// GetComponent path — the freeze/clone cost only buys safety
+			// against silent network desync, which non-replicated state
+			// can't have.
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game] public class Pos : IComponent { public int X; public int Y; } }";
+			TestHarness.Project p = Run(nameof(NonReplicated_MultiField_Getter_StaysOnGetComponent), source);
+			string entity = TestHarness.ReadGenerated(p, "Components/Game.Pos.cs");
+			Assert.Contains("get { return (global::G.Pos)GetComponent(GameComponentsLookup.Pos); }", entity);
+			Assert.DoesNotContain("GetReplicatedComponent", entity);
+		}
+
 		// ----------------------------------------------------------------
 		// Client replication codegen — Generated/{Ctx}ClientReplication.cs
 		// subscribes once per context to the runtime RemoteEvent and
@@ -639,7 +675,7 @@ namespace G {
 			// RemoteEvent. No per-component += handler from the old shape.
 			TestHarness.Project p = Run(nameof(ClientReplication_SubscribesOnceInConstructor), OneReplicatedHealth);
 			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
-			Assert.Contains("EntitiesReplication.Subscribe(\"Game\", OnOps);", mirror);
+			Assert.Contains("EntitiesReplication.Subscribe(\"Game\", GameComponentsLookup.BuildDigest, OnOps);", mirror);
 			Assert.DoesNotContain("HealthAdded +=", mirror);
 			Assert.DoesNotContain("GameReplication.", mirror);
 		}
@@ -857,12 +893,15 @@ namespace G { [Game, Unique] public class Score : IComponent { public int Value;
 			// Two entities trying to hold the same Unique component should
 			// surface immediately — matches Entitas's "one entity at a time"
 			// guarantee. The hook compares incoming entity to the tracked
-			// one and throws on mismatch.
+			// one and throws on mismatch. Hooks are public + IEntity-typed
+			// because they implement the I{Ctx}{Comp}ContextHooks interface
+			// (the entity-side cast site dispatches through the interface
+			// to break a transpiler-level circular import).
 			TestHarness.Project p = Run(nameof(Unique_Flag_HooksThrowOnConflictingEntity), OneUniqueFlag);
 			string comp = TestHarness.ReadGenerated(p, "Components/Game.GameSession.cs");
-			Assert.Contains("internal void _SetGameSessionEntity(GameEntity entity)", comp);
+			Assert.Contains("public void _SetGameSessionEntity(IEntity entity)", comp);
 			Assert.Contains("throw new System.Exception(\"Unique component GameSession is already assigned to a different entity.\");", comp);
-			Assert.Contains("internal void _ClearGameSessionEntity()", comp);
+			Assert.Contains("public void _ClearGameSessionEntity()", comp);
 		}
 
 		[Fact]
@@ -1015,7 +1054,7 @@ namespace G {
 		{
 			TestHarness.Project p = Run(nameof(PrimaryIndex_RegisterThrowsOnDuplicateKey), OnePrimaryIndexedUser);
 			string comp = TestHarness.ReadGenerated(p, "Components/Game.User.cs");
-			Assert.Contains("internal void _RegisterUser(GameEntity entity, string key)", comp);
+			Assert.Contains("public void _RegisterUser(IEntity entity, string key)", comp);
 			Assert.Contains("throw new System.Exception(\"PrimaryEntityIndex collision on User.UserId for key: \" + key);", comp);
 		}
 
@@ -1060,10 +1099,13 @@ namespace G {
 		[Fact]
 		public void EntityIndex_NonPrimary_RegisterAppendsToSet()
 		{
+			// Register casts IEntity → GameEntity first (the index dict is
+			// typed on the concrete entity), then appends the typed value.
 			TestHarness.Project p = Run(nameof(EntityIndex_NonPrimary_RegisterAppendsToSet), OneIndexedOwned);
 			string comp = TestHarness.ReadGenerated(p, "Components/Game.Owned.cs");
-			Assert.Contains("internal void _RegisterOwned(GameEntity entity, int key)", comp);
-			Assert.Contains("set.Add(entity);", comp);
+			Assert.Contains("public void _RegisterOwned(IEntity entity, int key)", comp);
+			Assert.Contains("GameEntity typed = (GameEntity)entity;", comp);
+			Assert.Contains("set.Add(typed);", comp);
 		}
 
 		[Fact]
@@ -1330,6 +1372,163 @@ namespace G {
 			TestHarness.Project p = Run(nameof(Watched_NonWatchedComponent_DoesNotSetChanged), OneGameHealth);
 			string comp = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
 			Assert.DoesNotContain("IsHealthChanged", comp);
+		}
+
+		// ----------------------------------------------------------------
+		// BuildDigest — codegen-stamped fingerprint of the sorted component
+		// layout. The Ready handshake compares client vs server digest and
+		// kicks the player on mismatch, closing the silent-desync window
+		// where a client built from drifted source would map componentIndex
+		// to a different type than the server expects.
+		// ----------------------------------------------------------------
+
+		private static string ExtractDigest(string lookup)
+		{
+			System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(
+				lookup, "public const string BuildDigest = \"([0-9a-f]+)\"");
+			Assert.True(m.Success, "Expected BuildDigest const in lookup source.");
+			return m.Groups[1].Value;
+		}
+
+		[Fact]
+		public void Digest_EmittedInComponentsLookup()
+		{
+			TestHarness.Project p = Run(nameof(Digest_EmittedInComponentsLookup), OneGameHealth);
+			string lookup = TestHarness.ReadGenerated(p, "GameComponentsLookup.cs");
+			string digest = ExtractDigest(lookup);
+			Assert.Equal(16, digest.Length);
+		}
+
+		[Fact]
+		public void Digest_DeterministicAcrossReruns()
+		{
+			// Same source → same digest; sort is stable, hash input is the
+			// FullName list verbatim. If this flakes, the sort or the
+			// hash input shape regressed.
+			string first = ExtractDigest(TestHarness.ReadGenerated(
+				Run(nameof(Digest_DeterministicAcrossReruns) + "_A", OneGameHealth),
+				"GameComponentsLookup.cs"));
+			string second = ExtractDigest(TestHarness.ReadGenerated(
+				Run(nameof(Digest_DeterministicAcrossReruns) + "_B", OneGameHealth),
+				"GameComponentsLookup.cs"));
+			Assert.Equal(first, second);
+		}
+
+		[Fact]
+		public void Digest_ChangesWhenComponentAdded()
+		{
+			string baseline = ExtractDigest(TestHarness.ReadGenerated(
+				Run(nameof(Digest_ChangesWhenComponentAdded) + "_Base", OneGameHealth),
+				"GameComponentsLookup.cs"));
+			string augmented = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G {
+	[Game] public class Health : IComponent { public int Value; }
+	[Game] public class Stamina : IComponent { public int Value; }
+}";
+			string altered = ExtractDigest(TestHarness.ReadGenerated(
+				Run(nameof(Digest_ChangesWhenComponentAdded) + "_Augmented", augmented),
+				"GameComponentsLookup.cs"));
+			Assert.NotEqual(baseline, altered);
+		}
+
+		[Fact]
+		public void Digest_ChangesWhenComponentRenamed()
+		{
+			string baseline = ExtractDigest(TestHarness.ReadGenerated(
+				Run(nameof(Digest_ChangesWhenComponentRenamed) + "_Base", OneGameHealth),
+				"GameComponentsLookup.cs"));
+			string renamed = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G { [Game] public class HitPoints : IComponent { public int Value; } }";
+			string altered = ExtractDigest(TestHarness.ReadGenerated(
+				Run(nameof(Digest_ChangesWhenComponentRenamed) + "_Renamed", renamed),
+				"GameComponentsLookup.cs"));
+			Assert.NotEqual(baseline, altered);
+		}
+
+		[Fact]
+		public void Digest_ChangesWhenComponentMovedToDifferentNamespace()
+		{
+			// Two builds with the SAME type-name and the SAME field shape,
+			// only the namespace differs. The digest must change — that's
+			// the whole reason (Namespace, TypeName) is the sort key.
+			string nsA = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace A { [Game] public class Health : IComponent { public int Value; } }";
+			string nsB = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace B { [Game] public class Health : IComponent { public int Value; } }";
+			string digestA = ExtractDigest(TestHarness.ReadGenerated(
+				Run(nameof(Digest_ChangesWhenComponentMovedToDifferentNamespace) + "_A", nsA),
+				"GameComponentsLookup.cs"));
+			string digestB = ExtractDigest(TestHarness.ReadGenerated(
+				Run(nameof(Digest_ChangesWhenComponentMovedToDifferentNamespace) + "_B", nsB),
+				"GameComponentsLookup.cs"));
+			Assert.NotEqual(digestA, digestB);
+		}
+
+		[Fact]
+		public void Sort_PrimaryKeyIsTypeName()
+		{
+			// Type names are unique within a context (the lookup emits
+			// a `const int {TypeName}` which would otherwise collide),
+			// so type-name alone gives a total order. Locks the wire
+			// contract: a build that adds an alphabetically-later
+			// component shifts only that component's index, never the
+			// earlier ones — and the digest catches it on the client
+			// side if a stale client misses the addition.
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G {
+	[Game] public class Velocity : IComponent { public int Value; }
+	[Game] public class Health : IComponent { public int Value; }
+	[Game] public class Armor : IComponent { public int Value; }
+}";
+			TestHarness.Project p = Run(nameof(Sort_PrimaryKeyIsTypeName), source);
+			string lookup = TestHarness.ReadGenerated(p, "GameComponentsLookup.cs");
+			int armorIdx = lookup.IndexOf("public const int Armor = ", StringComparison.Ordinal);
+			int healthIdx = lookup.IndexOf("public const int Health = ", StringComparison.Ordinal);
+			int velocityIdx = lookup.IndexOf("public const int Velocity = ", StringComparison.Ordinal);
+			Assert.True(armorIdx > 0 && healthIdx > 0 && velocityIdx > 0);
+			Assert.True(armorIdx < healthIdx, "Armor must precede Health alphabetically.");
+			Assert.True(healthIdx < velocityIdx, "Health must precede Velocity alphabetically.");
+			Assert.Contains("public const int Armor = 0;", lookup);
+			Assert.Contains("public const int Health = 1;", lookup);
+			Assert.Contains("public const int Velocity = 2;", lookup);
+		}
+
+		[Fact]
+		public void ServerReplication_ConstructorRegistersDigestBeforeSnapshotter()
+		{
+			// RegisterDigest must precede RegisterSnapshotter — the
+			// snapshot RemoteEvent's first OnServerEvent can fire as soon
+			// as a player joins, and the Ready handler reads _digests to
+			// validate. If we register the snapshotter first, an early
+			// join could land in the handler before the digest is set,
+			// and the comparison short-circuits to "no expectation =
+			// allow" — masking the desync we're trying to catch.
+			TestHarness.Project p = Run(
+				nameof(ServerReplication_ConstructorRegistersDigestBeforeSnapshotter),
+				OneReplicatedHealth);
+			string server = TestHarness.ReadGenerated(p, "GameServerReplication.cs");
+			int digestIdx = server.IndexOf("EntitiesReplication.RegisterDigest(\"Game\", GameComponentsLookup.BuildDigest);", StringComparison.Ordinal);
+			int snapshotIdx = server.IndexOf("EntitiesReplication.RegisterSnapshotter(\"Game\", Snapshot);", StringComparison.Ordinal);
+			Assert.True(digestIdx > 0 && snapshotIdx > 0, "Both registrations must appear.");
+			Assert.True(digestIdx < snapshotIdx, "RegisterDigest must precede RegisterSnapshotter.");
+		}
+
+		[Fact]
+		public void ClientReplication_SubscribeForwardsDigest()
+		{
+			TestHarness.Project p = Run(nameof(ClientReplication_SubscribeForwardsDigest), OneReplicatedHealth);
+			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
+			Assert.Contains("EntitiesReplication.Subscribe(\"Game\", GameComponentsLookup.BuildDigest, OnOps);", mirror);
 		}
 	}
 }

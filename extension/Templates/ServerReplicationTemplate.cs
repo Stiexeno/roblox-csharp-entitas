@@ -34,6 +34,11 @@ namespace RobloxCSharp.Extensions.Entities
 			sb.AppendLine($"\tpublic {ctx.Name}ServerReplication({contextType} context)");
 			sb.AppendLine("\t{");
 			sb.AppendLine("\t\t_context = context;");
+			// RegisterDigest must precede RegisterSnapshotter: the
+			// snapshot RemoteEvent's first OnServerEvent could fire as
+			// soon as a player joins, and the Ready handler reads
+			// _digests to validate. Ordering keeps that race closed.
+			sb.AppendLine($"\t\tEntitiesReplication.RegisterDigest(\"{ctx.Name}\", {ctx.Name}ComponentsLookup.BuildDigest);");
 			sb.AppendLine($"\t\tEntitiesReplication.RegisterSnapshotter(\"{ctx.Name}\", Snapshot);");
 			sb.AppendLine("\t}");
 			sb.AppendLine();

@@ -1,12 +1,36 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace RobloxCSharp.Extensions.Entities
 {
 	internal static class ComponentsLookupTemplate
 	{
+		// Fingerprint of the sorted component layout for this context.
+		// Both sides (server and client) emit the same digest when built
+		// from the same source; the runtime Ready handshake compares the
+		// client's digest against the server's expectation and kicks on
+		// mismatch. Computed over "FullName\n" lines so a rename, add,
+		// remove, or namespace change flips the digest. Truncated to 16
+		// hex chars — plenty against accidental collision, short enough
+		// not to dominate every wire payload if we ever fold it in.
+		internal static string ComputeBuildDigest(ContextModel ctx)
+		{
+			StringBuilder input = new();
+			foreach (ComponentModel c in ctx.Components)
+			{
+				input.Append(c.FullName);
+				input.Append('\n');
+			}
+			using SHA256 sha = SHA256.Create();
+			byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(input.ToString()));
+			StringBuilder hex = new();
+			for (int i = 0; i < 8; i++) hex.Append(hash[i].ToString("x2"));
+			return hex.ToString();
+		}
+
 		public static string Emit(ContextModel ctx)
 		{
 			StringBuilder sb = new();
@@ -36,6 +60,7 @@ namespace RobloxCSharp.Extensions.Entities
 				sb.AppendLine($"\tpublic const int {ctx.Components[i].TypeName} = {i};");
 			}
 			sb.AppendLine($"\tpublic const int TotalComponents = {ctx.Components.Count};");
+			sb.AppendLine($"\tpublic const string BuildDigest = \"{ComputeBuildDigest(ctx)}\";");
 			sb.AppendLine();
 			sb.AppendLine("\tpublic static readonly string[] componentNames =");
 			sb.AppendLine("\t{");

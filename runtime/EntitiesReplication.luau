@@ -30,11 +30,21 @@
 --
 -- Late join:
 --   • A shared Ready RemoteEvent (also under Plugins.Entities) carries a
---     client→server "I'm subscribed, send me the world" ping. The client
---     fires it exactly once on first Subscribe. The server walks every
---     registered snapshotter and FireClients the resulting ops batch
---     (chunked through the same path) directly to that one player on the
---     per-context RemoteEvent, tagged with the current server tick.
+--     client→server "I'm subscribed, send me the world" ping per context,
+--     tagged with the client's BuildDigest. The client fires it exactly
+--     once per context on first Subscribe. Server compares against the
+--     digest registered via RegisterDigest; mismatch kicks the player
+--     (the only safe response — componentIndex would map to a different
+--     type than the server expects).
+--   • On digest match the (player, contextName) pair is queued for the
+--     next heartbeat. The heartbeat drains the per-frame buffer FIRST
+--     (so the joining player receives this frame's batch like everyone
+--     else), then walks the queue and FireClients the snapshot ops
+--     batch directly to that one player on the per-context RemoteEvent,
+--     tagged with the post-drain server tick. Same RemoteEvent, same
+--     tick — Roblox preserves per-event ordering, so the client sees
+--     broadcast batch → snapshot. No race window where a Remove in
+--     the batch could undo a value present in the snapshot.
 --   • ApplySet on the client picks Add-vs-Replace by HasX so any tick-
 --     time op that races the snapshot stays idempotent — and pagination
 --     plays nicely with the racing concern because order is preserved.
@@ -58,7 +68,9 @@ EntitiesReplication._ticks = {}              -- contextName -> int (server monot
 EntitiesReplication._serverTicks = {}        -- contextName -> int (client: highest received)
 EntitiesReplication._heartbeatConnected = false
 EntitiesReplication._readyConnected = false  -- server: OnServerEvent wired
-EntitiesReplication._readyFired = false      -- client: fired once per session
+EntitiesReplication._readyFiredFor = {}      -- client: contextName -> true (fired once per context)
+EntitiesReplication._digests = {}            -- contextName -> string (server: expected client digest)
+EntitiesReplication._pendingSnapshots = {}   -- server: array of {player, contextName} queued by Ready ping, drained next heartbeat
 
 -- Plugins/Entities folder where every per-context RemoteEvent lives.
 -- Server lazy-creates it on first QueueSet; client lazy-waits on first
@@ -155,11 +167,17 @@ local function chunked(ops, fn)
 	end
 end
 
--- Server-side per-Heartbeat: tick every tracked context, then drain any
--- non-empty buffers. Tick advances even when nothing fired so the value
--- reflects wall-clock progress; client only learns about ticks via the
--- fires it actually receives, so quiet contexts leave the client's
--- serverTick frozen — that's a feature, not a bug.
+-- Server-side per-Heartbeat: tick every tracked context, drain any
+-- non-empty buffers, then send late-join snapshots to players queued
+-- since the previous heartbeat. Snapshots are deferred to here (rather
+-- than fired inline from OnServerEvent) so a joining player can't
+-- receive a snapshot built post-mutation racing a FireAllClients batch
+-- that contains the pre-snapshot ops — both come from the same tick on
+-- the same RemoteEvent, ordered: broadcast first, snapshot second.
+-- Tick advances even when nothing fires so the value reflects wall-
+-- clock progress; client only learns about ticks via the fires it
+-- actually receives, so quiet contexts leave the client's serverTick
+-- frozen — that's a feature, not a bug.
 local function heartbeatTick()
 	for contextName in pairs(EntitiesReplication._contexts) do
 		EntitiesReplication._ticks[contextName] = EntitiesReplication._ticks[contextName] + 1
@@ -172,6 +190,37 @@ local function heartbeatTick()
 				ev:FireAllClients(tick, chunk)
 			end)
 			EntitiesReplication._buffers[contextName] = {}
+		end
+	end
+
+	-- Snapshot phase. Pending players were queued by the Ready event
+	-- handler at any point during the frame; drain them now so each
+	-- player gets a snapshot tagged with the post-drain tick. The
+	-- batch above has already flown for the current frame, so the
+	-- joining player sees: broadcast (frame N's diffs to everyone) →
+	-- snapshot (state after frame N's commits). No room for a Remove
+	-- in the batch to undo a value present in the snapshot, and vice
+	-- versa.
+	local pending = EntitiesReplication._pendingSnapshots
+	if #pending > 0 then
+		EntitiesReplication._pendingSnapshots = {}
+		for i = 1, #pending do
+			local entry = pending[i]
+			local player = entry.player
+			local contextName = entry.contextName
+			local snapshotFn = EntitiesReplication._snapshotters[contextName]
+			if snapshotFn ~= nil then
+				local ok, ops = pcall(snapshotFn)
+				if not ok then
+					warn("EntitiesReplication: snapshotter for context '" .. contextName .. "' errored: " .. tostring(ops))
+				elseif ops ~= nil and #ops > 0 then
+					local ctxEv = getOrCreateEvent(contextName)
+					local tick = EntitiesReplication._ticks[contextName] or 0
+					chunked(ops, function(chunk)
+						ctxEv:FireClient(player, tick, chunk)
+					end)
+				end
+			end
 		end
 	end
 end
@@ -188,21 +237,27 @@ local function ensureReadyListener()
 	if not EntitiesReplication._isServer then return end
 	EntitiesReplication._readyConnected = true
 	local readyEv = getOrCreateReadyEvent()
-	-- pcall the snapshotter so a buggy user fn for one context doesn't
-	-- starve the others for this player.
-	readyEv.OnServerEvent:Connect(function(player)
-		for contextName, snapshotFn in pairs(EntitiesReplication._snapshotters) do
-			local ok, ops = pcall(snapshotFn)
-			if not ok then
-				warn("EntitiesReplication: snapshotter for context '" .. contextName .. "' errored: " .. tostring(ops))
-			elseif ops ~= nil and #ops > 0 then
-				local ctxEv = getOrCreateEvent(contextName)
-				local tick = EntitiesReplication._ticks[contextName] or 0
-				chunked(ops, function(chunk)
-					ctxEv:FireClient(player, tick, chunk)
-				end)
-			end
+	-- Validate digest, then queue (player, contextName) for the next
+	-- heartbeat's snapshot drain. Digest is the codegen-stamped fingerprint
+	-- of the sorted component layout for this context — a mismatch means
+	-- the client's componentIndex ↔ type mapping disagrees with the
+	-- server's, so every Set op routed by index would land on the wrong
+	-- component. Kicking the player is the only safe response; let them
+	-- restart with the current client build.
+	readyEv.OnServerEvent:Connect(function(player, contextName, clientDigest)
+		local expected = EntitiesReplication._digests[contextName]
+		if expected ~= nil and clientDigest ~= expected then
+			player:Kick(
+				"[Entities] Context '" .. tostring(contextName) ..
+				"' build digest mismatch (client=" .. tostring(clientDigest) ..
+				", server=" .. tostring(expected) ..
+				"). Update your client.")
+			return
 		end
+		table.insert(EntitiesReplication._pendingSnapshots, {
+			player = player,
+			contextName = contextName,
+		})
 	end)
 end
 
@@ -234,12 +289,14 @@ function EntitiesReplication.QueueRemove(contextName, componentIndex, entityId)
 end
 
 -- Client-side single subscription point. The codegen-emitted
--- {Ctx}ClientReplication ctor calls this exactly once per context with a
--- handler `(ops) -> nil`. We wrap to also update `_serverTicks` from the
--- payload's tick field before dispatching the ops array. First call also
--- pings the server's Ready event so it can dispatch a late-join snapshot
--- back; subsequent Subscribes don't re-ping.
-function EntitiesReplication.Subscribe(contextName, handler)
+-- {Ctx}ClientReplication ctor calls this exactly once per context with the
+-- locally-known BuildDigest and a handler `(ops) -> nil`. We wrap to also
+-- update `_serverTicks` from the payload's tick field before dispatching
+-- the ops array. First call per context also pings the server's Ready
+-- event with (contextName, digest) so the server can validate the
+-- handshake and dispatch a late-join snapshot back; subsequent Subscribes
+-- on the same context don't re-ping.
+function EntitiesReplication.Subscribe(contextName, buildDigest, handler)
 	if EntitiesReplication._isServer then return end
 	local ev = getOrCreateEvent(contextName)
 	ev.OnClientEvent:Connect(function(tick, ops)
@@ -249,11 +306,20 @@ function EntitiesReplication.Subscribe(contextName, handler)
 		end
 		handler(ops)
 	end)
-	if not EntitiesReplication._readyFired then
-		EntitiesReplication._readyFired = true
+	if EntitiesReplication._readyFiredFor[contextName] == nil then
+		EntitiesReplication._readyFiredFor[contextName] = true
 		local readyEv = getOrCreateReadyEvent()
-		readyEv:FireServer()
+		readyEv:FireServer(contextName, buildDigest)
 	end
+end
+
+-- Server-only. Registers the expected client BuildDigest for a context.
+-- Stored for comparison in the Ready handler — see ensureReadyListener.
+-- Codegen-emitted {Ctx}ServerReplication ctor calls this once per context
+-- with {Ctx}ComponentsLookup.BuildDigest.
+function EntitiesReplication.RegisterDigest(contextName, buildDigest)
+	if not EntitiesReplication._isServer then return end
+	EntitiesReplication._digests[contextName] = buildDigest
 end
 
 -- Server-only. The codegen-emitted {Ctx}ServerReplication ctor registers

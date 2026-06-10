@@ -33,6 +33,17 @@ namespace Entities
 		public extern void ReplaceComponent(int index, IComponent component);
 
 		public extern IComponent GetComponent(int index);
+
+		// Frozen-snapshot variant: returns a shallow-cloned, table.frozen
+		// copy of the component so user code can't mutate fields in place.
+		// The codegen-emitted property getter for [Replicated] multi-field
+		// components routes through this, closing the silent-desync hazard
+		// where `e.Position.X = 5` would otherwise change state without
+		// going through ReplaceX (which is the replication entrypoint).
+		// Non-replicated components still hit GetComponent to avoid the
+		// per-Get clone allocation.
+		public extern IComponent GetReplicatedComponent(int index);
+
 		public extern IComponent[] GetComponents();
 		public extern int[] GetComponentIndices();
 

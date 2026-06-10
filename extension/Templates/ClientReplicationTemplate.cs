@@ -40,7 +40,11 @@ namespace RobloxCSharp.Extensions.Entities
 			sb.AppendLine($"\tpublic {ctx.Name}ClientReplication({contextType} context)");
 			sb.AppendLine("\t{");
 			sb.AppendLine("\t\t_context = context;");
-			sb.AppendLine($"\t\tEntitiesReplication.Subscribe(\"{ctx.Name}\", OnOps);");
+			// Passes BuildDigest so the server's Ready handler can compare
+			// our component layout against its own and kick on mismatch
+			// — the only safe response when the two sides disagree on
+			// componentIndex ↔ type mapping.
+			sb.AppendLine($"\t\tEntitiesReplication.Subscribe(\"{ctx.Name}\", {ctx.Name}ComponentsLookup.BuildDigest, OnOps);");
 			sb.AppendLine("\t}");
 			sb.AppendLine();
 

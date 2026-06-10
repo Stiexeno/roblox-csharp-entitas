@@ -151,7 +151,21 @@ namespace RobloxCSharp.Extensions.Entities
 
 				foreach (ContextModel ctx in byContext.Values)
 				{
-					ctx.Components.Sort((a, b) => string.Compare(a.TypeName, b.TypeName, StringComparison.Ordinal));
+					// Stable componentIndex across builds. Type names are
+					// unique within a context today (the lookup template
+					// emits `public const int {TypeName}` which would
+					// collide on duplicates), so type-name alone gives a
+					// total order. The namespace secondary key is
+					// defensive — if the lookup template ever emits
+					// namespace-qualified consts, the order stays
+					// well-defined under name collisions without an extra
+					// migration. This sort is what BuildDigest hashes,
+					// so it's also the wire contract.
+					ctx.Components.Sort((a, b) =>
+					{
+						int n = string.Compare(a.NamespaceName ?? "", b.NamespaceName ?? "", StringComparison.Ordinal);
+						return n != 0 ? n : string.Compare(a.TypeName, b.TypeName, StringComparison.Ordinal);
+					});
 					SymbolHelpers.WriteFile(genDir, $"{ctx.Name}ComponentsLookup.cs", ComponentsLookupTemplate.Emit(ctx));
 					SymbolHelpers.WriteFile(genDir, $"{ctx.Name}Context.cs", ContextTemplate.Emit(ctx));
 					SymbolHelpers.WriteFile(genDir, $"{ctx.Name}Entity.cs", EntityTemplate.Emit(ctx));
