@@ -118,10 +118,12 @@ namespace RobloxCSharp.Extensions.Entities
 			string genDir = Path.Combine(srcDir, GeneratedFolder);
 			string componentsDir = Path.Combine(genDir, "Components");
 			string watchedDir = Path.Combine(genDir, "Watched");
+			string commandsDir = Path.Combine(genDir, "Commands");
 
 			HashSet<string> expectedRootFiles = new(StringComparer.OrdinalIgnoreCase);
 			HashSet<string> expectedComponentFiles = new(StringComparer.OrdinalIgnoreCase);
 			HashSet<string> expectedWatchedFiles = new(StringComparer.OrdinalIgnoreCase);
+			HashSet<string> expectedCommandsFiles = new(StringComparer.OrdinalIgnoreCase);
 
 			if (byContext.Count > 0)
 			{
@@ -147,6 +149,29 @@ namespace RobloxCSharp.Extensions.Entities
 						SymbolHelpers.WriteFile(watchedDir, fileName, WatchedFlagClassTemplate.Emit(src));
 						expectedWatchedFiles.Add(fileName);
 					}
+				}
+
+				// Command + OriginUserId synthesis — injected into every
+				// context unconditionally. The Command flag is the user-
+				// facing client→server ship trigger (`entity.IsCommand =
+				// true`); OriginUserId is the server-attached trust marker
+				// carrying Player.UserId. Both class files live globally
+				// (no namespace) so every context's lookup shares one C#
+				// type; the files are emitted exactly once. Contexts that
+				// never use commands pay nothing at runtime — the wire is
+				// lazy and the per-frame drain is empty.
+				Directory.CreateDirectory(commandsDir);
+				const string originUserIdFileName = "OriginUserId.cs";
+				const string commandFlagFileName = "Command.cs";
+				SymbolHelpers.WriteFile(commandsDir, originUserIdFileName, OriginUserIdClassTemplate.Emit());
+				SymbolHelpers.WriteFile(commandsDir, commandFlagFileName, CommandFlagClassTemplate.Emit());
+				expectedCommandsFiles.Add(originUserIdFileName);
+				expectedCommandsFiles.Add(commandFlagFileName);
+
+				foreach (ContextModel ctx in byContext.Values)
+				{
+					ctx.Components.Add(ComponentModel.CreateCommandFlag());
+					ctx.Components.Add(ComponentModel.CreateOriginUserId());
 				}
 
 				foreach (ContextModel ctx in byContext.Values)
@@ -227,6 +252,32 @@ namespace RobloxCSharp.Extensions.Entities
 						expectedRootFiles.Add($"{ctx.Name}ClientReplication.cs");
 					}
 
+					// Commands — emitted unconditionally per context. The
+					// client trigger is `entity.IsCommand = true`; the
+					// setter tail marks the entity in the per-context
+					// pending set, and the heartbeat drain ships the
+					// entity's complete component set. Server receives,
+					// spawns one entity per clientLocalId, applies every
+					// carried component, and tail-attaches OriginUserId
+					// from the Player.
+					//
+					// Pair per context:
+					//   {Ctx}ClientCommandSender — registers a shipper
+					//     fn with EntitiesReplication. The shipper walks
+					//     entity.GetComponentIndices() and dispatches
+					//     per index.
+					//   {Ctx}ServerCommandReceiver — registers a
+					//     receiver fn that decodes ops by index and
+					//     applies them onto a fresh entity.
+					//
+					// Contexts that never use commands instantiate
+					// neither and pay nothing at runtime — RemoteEvents
+					// stay uncreated, pending sets stay empty.
+					SymbolHelpers.WriteFile(genDir, $"{ctx.Name}ClientCommandSender.cs", ClientCommandSenderTemplate.Emit(ctx));
+					SymbolHelpers.WriteFile(genDir, $"{ctx.Name}ServerCommandReceiver.cs", ServerCommandReceiverTemplate.Emit(ctx));
+					expectedRootFiles.Add($"{ctx.Name}ClientCommandSender.cs");
+					expectedRootFiles.Add($"{ctx.Name}ServerCommandReceiver.cs");
+
 					// [Watched] cleanup — emit per context when any component
 					// in the context is [Watched]. The user adds it to the
 					// tail of their feature pipeline; it clears every Changed
@@ -270,6 +321,14 @@ namespace RobloxCSharp.Extensions.Entities
 				{
 					string name = Path.GetFileName(existing);
 					if (!expectedWatchedFiles.Contains(name)) File.Delete(existing);
+				}
+			}
+			if (Directory.Exists(commandsDir))
+			{
+				foreach (string existing in Directory.EnumerateFiles(commandsDir, "*.cs"))
+				{
+					string name = Path.GetFileName(existing);
+					if (!expectedCommandsFiles.Contains(name)) File.Delete(existing);
 				}
 			}
 			if (Directory.Exists(genDir))

@@ -215,7 +215,13 @@ using Entities.CodeGeneration.Attributes;
 			string entity = GetEntity(outputs);
 			Assert.Contains("function GameEntity:Pos()", entity);
 			Assert.Contains("self:GetComponent(GameComponentsLookup.Pos)", entity);
-			Assert.DoesNotContain(".Value", entity);
+			// Scope to just the Pos getter body — synthesized OriginUserId
+			// elsewhere has a .Value getter that would otherwise trip
+			// this DoesNotContain check.
+			int posGetterIdx = entity.IndexOf("function GameEntity:Pos()", StringComparison.Ordinal);
+			int posGetterEnd = entity.IndexOf("end", posGetterIdx, StringComparison.Ordinal);
+			string posGetter = entity.Substring(posGetterIdx, posGetterEnd - posGetterIdx);
+			Assert.DoesNotContain(".Value", posGetter);
 			// No setter â€” the user must call ReplacePos(x, y).
 			Assert.DoesNotContain("set_Pos", entity);
 		}

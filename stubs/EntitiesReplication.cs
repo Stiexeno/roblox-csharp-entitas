@@ -80,5 +80,39 @@ namespace Entities
 		// the server actually fires something).
 		public extern static int GetTick(string contextName);
 		public extern static int GetServerTick(string contextName);
+
+		// --- Command wire (client → server) ----------------------------
+
+		// Returns true on the client, false on the server — the codegen
+		// guards MarkCommandPending with this so a server-side
+		// `IsCommand = true` (e.g., when the receiver applies it on the
+		// spawned entity) is a pure component flip with no wire effect.
+		public extern static bool ShouldSendCommand();
+
+		// Client trigger. The synthesized Command flag's setter calls
+		// this on the true branch; the heartbeat drain ships the entity's
+		// full component set. Dedupes via a per-context set, so repeated
+		// `IsCommand = true` on the same entity within a frame doesn't
+		// double-ship.
+		public extern static void MarkCommandPending(string contextName, IEntity entity);
+
+		// False-branch counterpart. Toggling IsCommand off before the
+		// next heartbeat cancels the pending ship cleanly.
+		public extern static void UnmarkCommandPending(string contextName, IEntity entity);
+
+		// Client-only. Codegen-emitted {Ctx}ClientCommandSender ctor
+		// registers a shipper fn alongside the BuildDigest. The shipper
+		// walks the entity's components and emits one op per component
+		// into the supplied list — codegen knows the field layout per
+		// component, so it dispatches per index.
+		public extern static void ConfigureCommandSender(string contextName, string buildDigest, object shipper);
+
+		// Server-only. Codegen-emitted {Ctx}ServerCommandReceiver ctor
+		// calls this with a handler `(player, ops) -> nil`. The runtime
+		// validates the per-fire BuildDigest, then dispatches. Handler is
+		// responsible for: collating ops by clientLocalId, calling
+		// CreateEntity on the context, applying components by index,
+		// attaching OriginUserId from the Player.
+		public extern static void RegisterCommandReceiver(string contextName, object receiver);
 	}
 }

@@ -29,6 +29,20 @@ namespace RobloxCSharp.Extensions.Entities
 			string fireRemove = c.IsReplicated
 				? $" if (EntitiesReplication.ShouldEmit()) EntitiesReplication.QueueRemove(\"{ctx.Name}\", {lookup}, creationIndex);"
 				: "";
+
+			// Synthesized Command flag — this is the client→server ship
+			// trigger. True branch marks the entity in the pending set
+			// (heartbeat drain will serialize + fire). False branch
+			// unmarks so toggling off pre-drain cancels the ship cleanly.
+			// Guarded by ShouldSendCommand so the server-side `IsCommand =
+			// true` (e.g., in CommandReceiver) is a pure component flip
+			// with no wire effect.
+			string markCommandPending = c.IsSynthesizedCommandFlag
+				? $" if (EntitiesReplication.ShouldSendCommand()) EntitiesReplication.MarkCommandPending(\"{ctx.Name}\", this);"
+				: "";
+			string unmarkCommandPending = c.IsSynthesizedCommandFlag
+				? $" if (EntitiesReplication.ShouldSendCommand()) EntitiesReplication.UnmarkCommandPending(\"{ctx.Name}\", this);"
+				: "";
 			string uniqueSet = c.IsUnique
 				? $" {{ I{ctx.Name}{c.TypeName}ContextHooks _ctx = context as I{ctx.Name}{c.TypeName}ContextHooks; if (_ctx != null) _ctx._Set{c.TypeName}Entity(this); }}"
 				: "";
@@ -47,8 +61,8 @@ namespace RobloxCSharp.Extensions.Entities
 			sb.AppendLine("\t\t{");
 			sb.AppendLine($"\t\t\tif (value != Is{c.TypeName})");
 			sb.AppendLine("\t\t\t{");
-			sb.AppendLine($"\t\t\t\tif (value) {{ AddComponent({lookup}, _{c.TypeName}Component);{fireAdd}{uniqueSet}{watchedFlag} }}");
-			sb.AppendLine($"\t\t\t\telse {{ RemoveComponent({lookup});{fireRemove}{uniqueClear}{watchedFlag} }}");
+			sb.AppendLine($"\t\t\t\tif (value) {{ AddComponent({lookup}, _{c.TypeName}Component);{fireAdd}{markCommandPending}{uniqueSet}{watchedFlag} }}");
+			sb.AppendLine($"\t\t\t\telse {{ RemoveComponent({lookup});{fireRemove}{unmarkCommandPending}{uniqueClear}{watchedFlag} }}");
 			sb.AppendLine("\t\t\t}");
 			sb.AppendLine("\t\t}");
 			sb.AppendLine("\t}");

@@ -76,6 +76,32 @@ EntitiesReplication._digests = {}            -- contextName -> string (server: e
 EntitiesReplication._pendingSnapshots = {}   -- server: array of {player, contextName} queued by Ready ping, drained next heartbeat
 EntitiesReplication._baselines = {}          -- server: contextName -> entityId -> componentIndex -> {lastSentField1, lastSentField2, ...}
 
+-- Command wire (client → server). Separate RemoteEvent per context lives
+-- at Plugins.Entities.<Context>Command. Op shape is intentionally simpler
+-- than the server→client Set wire because each command spawns a fresh
+-- server-side entity — there's no baseline to diff against, so we don't
+-- carry a bitmask. Every field rides explicitly.
+--   command op = {componentIndex, clientLocalId, ...allFields}
+-- The client batches per heartbeat by clientLocalId — all ops sharing the
+-- same id arrive together and land on one server-side entity. clientLocalId
+-- is just a correlation key within a single FireServer batch; the server
+-- doesn't persist it.
+--
+-- Trigger model: user sets `entity.IsCommand = true`. The codegen-emitted
+-- setter tails MarkCommandPending; the heartbeat drain re-checks
+-- IsCommand on each pending entity (so a same-frame toggle off cancels
+-- cleanly), then invokes the per-context shipper which walks the entity's
+-- component indices and emits one op per component. The Command flag
+-- itself rides — the server-spawned entity carries it too so
+-- AllOf<Command, ...> works on both sides.
+EntitiesReplication._commandEvents = {}      -- contextName -> RemoteEvent (per side)
+EntitiesReplication._commandReceivers = {}   -- server: contextName -> (player, ops) -> nil
+EntitiesReplication._commandDigests = {}     -- client: contextName -> BuildDigest (forwarded with every fire)
+EntitiesReplication._commandShippers = {}    -- client: contextName -> (entity, outOps) -> nil (codegen-registered)
+EntitiesReplication._commandPending = {}     -- client: contextName -> array of entities awaiting ship
+EntitiesReplication._commandPendingSet = {}  -- client: contextName -> entity -> true (dedupe set; mirrors _commandPending)
+EntitiesReplication._commandHeartbeatConnected = false  -- client: hook installed flag
+
 -- Plugins/Entities folder where every per-context RemoteEvent lives.
 -- Server lazy-creates it on first QueueSet; client lazy-waits on first
 -- Subscribe. Roblox guarantees ReplicatedStorage exists before scripts
@@ -435,6 +461,164 @@ end
 function EntitiesReplication.GetServerTick(contextName)
 	if EntitiesReplication._isServer then return 0 end
 	return EntitiesReplication._serverTicks[contextName] or 0
+end
+
+-- ---------------------------------------------------------------------
+-- Command wire (client → server).
+-- ---------------------------------------------------------------------
+
+local function getOrCreateCommandEvent(contextName)
+	local existing = EntitiesReplication._commandEvents[contextName]
+	if existing ~= nil then return existing end
+
+	local parent = pluginsFolder()
+	local eventName = contextName .. "Command"
+
+	if EntitiesReplication._isServer then
+		local inst = parent:FindFirstChild(eventName)
+		if inst == nil then
+			inst = Instance.new("RemoteEvent")
+			inst.Name = eventName
+			inst.Parent = parent
+		end
+		EntitiesReplication._commandEvents[contextName] = inst
+		return inst
+	else
+		local inst = parent:WaitForChild(eventName)
+		EntitiesReplication._commandEvents[contextName] = inst
+		return inst
+	end
+end
+
+-- Client-side per-Heartbeat drain. Walks every context with pending
+-- entities, invokes the registered shipper to build the op batch (one
+-- op per component on each entity), and fires with the locally-known
+-- BuildDigest as the leading arg (server re-validates every fire —
+-- Ready alone doesn't establish a trusted session, so the digest needs
+-- to ride each batch). After firing, the entity stays in the user's
+-- world; user-side cleanup (typically a CommandHandlerSystem on the
+-- client mirror, or just a one-frame entity factory) handles teardown.
+local function commandHeartbeatDrain()
+	for contextName, pending in pairs(EntitiesReplication._commandPending) do
+		if #pending > 0 then
+			local shipper = EntitiesReplication._commandShippers[contextName]
+			local digest = EntitiesReplication._commandDigests[contextName]
+			if shipper ~= nil then
+				local ops = {}
+				for i = 1, #pending do
+					local entity = pending[i]
+					-- Re-check: user could have toggled IsCommand off
+					-- post-Mark, or destroyed the entity entirely.
+					-- Skipping here keeps the ship cancellable up to
+					-- the heartbeat boundary.
+					if entity:isEnabled() then
+						shipper(entity, ops)
+					end
+				end
+				if #ops > 0 then
+					local ev = getOrCreateCommandEvent(contextName)
+					chunked(ops, function(chunk)
+						ev:FireServer(digest, chunk)
+					end)
+				end
+			end
+			EntitiesReplication._commandPending[contextName] = {}
+			EntitiesReplication._commandPendingSet[contextName] = {}
+		end
+	end
+end
+
+local function ensureCommandHeartbeatHook()
+	if EntitiesReplication._commandHeartbeatConnected then return end
+	if EntitiesReplication._isServer then return end
+	RunService.Heartbeat:Connect(commandHeartbeatDrain)
+	EntitiesReplication._commandHeartbeatConnected = true
+end
+
+function EntitiesReplication.ShouldSendCommand()
+	return not EntitiesReplication._isServer
+end
+
+-- Client trigger. Codegen-emitted setter for the synthesized Command
+-- flag's true branch calls this. We dedupe via the per-context set so
+-- repeated IsCommand=true within one frame don't double-ship; insertion
+-- order in _commandPending defines the heartbeat-drain order.
+function EntitiesReplication.MarkCommandPending(contextName, entity)
+	if EntitiesReplication._isServer then return end
+	local set = EntitiesReplication._commandPendingSet[contextName]
+	if set == nil then
+		set = {}
+		EntitiesReplication._commandPendingSet[contextName] = set
+	end
+	if set[entity] then return end
+	set[entity] = true
+
+	local pending = EntitiesReplication._commandPending[contextName]
+	if pending == nil then
+		pending = {}
+		EntitiesReplication._commandPending[contextName] = pending
+	end
+	table.insert(pending, entity)
+	ensureCommandHeartbeatHook()
+end
+
+-- False-branch counterpart. Toggling IsCommand off pre-drain cancels
+-- the pending ship cleanly. After a drain the entity gets re-added
+-- naturally if IsCommand flips back on next frame.
+function EntitiesReplication.UnmarkCommandPending(contextName, entity)
+	if EntitiesReplication._isServer then return end
+	local set = EntitiesReplication._commandPendingSet[contextName]
+	if set == nil or not set[entity] then return end
+	set[entity] = nil
+
+	local pending = EntitiesReplication._commandPending[contextName]
+	if pending == nil then return end
+	for i = #pending, 1, -1 do
+		if pending[i] == entity then
+			table.remove(pending, i)
+			return
+		end
+	end
+end
+
+-- Client setup. Codegen-emitted {Ctx}ClientCommandSender ctor calls
+-- this once per context with the locally-known BuildDigest and a
+-- shipper fn. The shipper walks the entity's components and pushes
+-- one op per component into the supplied list. We hold both for the
+-- heartbeat drain to invoke; the digest also rides the wire so the
+-- server can validate per-fire (Ready handshake alone isn't enough
+-- for command authorization — first commands can race the Ready ping).
+function EntitiesReplication.ConfigureCommandSender(contextName, buildDigest, shipper)
+	if EntitiesReplication._isServer then return end
+	EntitiesReplication._commandDigests[contextName] = buildDigest
+	EntitiesReplication._commandShippers[contextName] = shipper
+	getOrCreateCommandEvent(contextName)
+	ensureCommandHeartbeatHook()
+end
+
+-- Server setup. Codegen-emitted {Ctx}ServerCommandReceiver ctor calls
+-- this with a handler `(player, ops) -> nil`. The runtime wires a
+-- OnServerEvent listener that validates the per-fire BuildDigest against
+-- the context's expected digest (registered via RegisterDigest) and
+-- kicks the player on mismatch — same hard-fail safeguard as the Ready
+-- ping. On match it dispatches ops to the user handler, which decodes
+-- them, spawns entities, and attaches OriginUserId from the Player.
+function EntitiesReplication.RegisterCommandReceiver(contextName, receiver)
+	if not EntitiesReplication._isServer then return end
+	EntitiesReplication._commandReceivers[contextName] = receiver
+	local ev = getOrCreateCommandEvent(contextName)
+	ev.OnServerEvent:Connect(function(player, clientDigest, ops)
+		local expected = EntitiesReplication._digests[contextName]
+		if expected ~= nil and clientDigest ~= expected then
+			player:Kick(
+				"[Entities] Context '" .. tostring(contextName) ..
+				"' command digest mismatch (client=" .. tostring(clientDigest) ..
+				", server=" .. tostring(expected) ..
+				"). Update your client.")
+			return
+		end
+		receiver(player, ops)
+	end)
 end
 
 return EntitiesReplication

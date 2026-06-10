@@ -219,6 +219,173 @@ namespace Entities.Tests
 			Assert.Contains("ctxBase[entityId] = nil", body);
 		}
 
+		// ----------------------------------------------------------------
+		// CommandHandlerSystem base — mirrors frozen-feast's
+		// RequestHandlerSystem shape. Pre-built group, OnExecute override,
+		// auto-destroy after, opt-out via ShouldCancelRequestDeletion.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void CommandHandlerSystem_AutoDestroysMatchedEntitiesAfterOnExecute()
+		{
+			string src = ReadRuntime("CommandHandlerSystem.luau");
+			string body = ExtractBetween(src,
+				"function CommandHandlerSystem:Execute()",
+				"\nend");
+			// Empty-group short-circuit, OnExecute, opt-out check, destroy
+			// loop — ordering matters: opt-out must come AFTER OnExecute
+			// so subclasses can flip it inside.
+			int countIdx = body.IndexOf("if self._requests:count() == 0", System.StringComparison.Ordinal);
+			int execIdx = body.IndexOf("self:OnExecute(self._requests)", System.StringComparison.Ordinal);
+			int cancelIdx = body.IndexOf("self.ShouldCancelRequestDeletion", System.StringComparison.Ordinal);
+			int destroyIdx = body.IndexOf("buf[i]:Destroy()", System.StringComparison.Ordinal);
+			Assert.True(countIdx >= 0 && execIdx > countIdx, "Empty-group short-circuit precedes OnExecute.");
+			Assert.True(cancelIdx > execIdx, "ShouldCancelRequestDeletion check follows OnExecute (subclass can flip it).");
+			Assert.True(destroyIdx > cancelIdx, "Destroy loop is guarded by the cancel check.");
+		}
+
+		[Fact]
+		public void CommandHandlerSystem_ReusesBufferAcrossExecutes()
+		{
+			// The shared _requestBuffer is the perf-critical trick — same
+			// array re-used every frame so the destroy loop pays no
+			// allocation per execute.
+			string src = ReadRuntime("CommandHandlerSystem.luau");
+			Assert.Contains("self._requestBuffer = {}", src);
+			Assert.Contains("self._requests:GetEntities(self._requestBuffer)", src);
+		}
+
+		// ----------------------------------------------------------------
+		// Command wire — `entity.IsCommand = true` is the trigger. The
+		// setter tail marks the entity in a per-context pending set; the
+		// heartbeat drain re-checks IsCommand on each entity (allowing
+		// mid-frame cancel), invokes the codegen-registered shipper to
+		// build ops, and FireServers with the digest as leading arg.
+		// Server validates the digest per-fire and dispatches.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void Command_StateTablesAreDeclared()
+		{
+			string src = ReadRuntime("EntitiesReplication.luau");
+			Assert.Contains("EntitiesReplication._commandEvents = {}", src);
+			Assert.Contains("EntitiesReplication._commandReceivers = {}", src);
+			Assert.Contains("EntitiesReplication._commandDigests = {}", src);
+			Assert.Contains("EntitiesReplication._commandShippers = {}", src);
+			Assert.Contains("EntitiesReplication._commandPending = {}", src);
+			Assert.Contains("EntitiesReplication._commandPendingSet = {}", src);
+		}
+
+		[Fact]
+		public void Command_ShouldSendCommand_IsClientOnly()
+		{
+			// Inverse of ShouldEmit's server-only guard: returns true on
+			// the client so the synthesized Command flag's setter tail
+			// only fires there.
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.ShouldSendCommand()",
+				"\nend");
+			Assert.Contains("not EntitiesReplication._isServer", body);
+		}
+
+		[Fact]
+		public void Command_MarkCommandPending_ServerNoOp()
+		{
+			// Server-side IsCommand = true (e.g., when the receiver flips
+			// it on the spawned entity) must not enqueue a wire op back
+			// at the server. The guard is required, not optional.
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.MarkCommandPending(contextName, entity)",
+				"\nend");
+			Assert.Contains("if EntitiesReplication._isServer then return end", body);
+		}
+
+		[Fact]
+		public void Command_MarkCommandPending_DedupesViaSet()
+		{
+			// Multiple IsCommand=true within a frame must not double-add
+			// the entity to _commandPending — that'd ship its components
+			// twice on the same heartbeat.
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.MarkCommandPending(contextName, entity)",
+				"\nend");
+			Assert.Contains("if set[entity] then return end", body);
+			Assert.Contains("set[entity] = true", body);
+			Assert.Contains("table.insert(pending, entity)", body);
+		}
+
+		[Fact]
+		public void Command_UnmarkCommandPending_RemovesFromBothSets()
+		{
+			// Toggling IsCommand off pre-drain cancels cleanly: drops the
+			// entity from both the dedupe set and the order-preserving
+			// array.
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.UnmarkCommandPending(contextName, entity)",
+				"\nend");
+			Assert.Contains("set[entity] = nil", body);
+			Assert.Contains("table.remove(pending, i)", body);
+		}
+
+		[Fact]
+		public void Command_HeartbeatDrain_RechecksIsEnabledBeforeShipping()
+		{
+			// User can destroy the entity between IsCommand=true and the
+			// heartbeat. Re-checking isEnabled keeps the drain crash-free
+			// for destroyed entities still in the pending array.
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"local function commandHeartbeatDrain()",
+				"\nend");
+			Assert.Contains("entity:isEnabled()", body);
+			Assert.Contains("shipper(entity, ops)", body);
+		}
+
+		[Fact]
+		public void Command_HeartbeatDrain_ForwardsDigestPerFire()
+		{
+			// FireServer carries (digest, ops) — server's listener splits
+			// them. Per-fire digest because Ready alone can't gate
+			// commands (first fires race the ping).
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"local function commandHeartbeatDrain()",
+				"\nend");
+			Assert.Contains("digest = EntitiesReplication._commandDigests[contextName]", body);
+			Assert.Contains("ev:FireServer(digest, chunk)", body);
+		}
+
+		[Fact]
+		public void Command_HeartbeatDrain_ClearsPendingAfterFire()
+		{
+			// Same reset pattern as the replication buffer: after the
+			// fire, both the dedupe set and the array are replaced with
+			// empty tables so next frame's enqueues land fresh.
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"local function commandHeartbeatDrain()",
+				"\nend");
+			Assert.Contains("EntitiesReplication._commandPending[contextName] = {}", body);
+			Assert.Contains("EntitiesReplication._commandPendingSet[contextName] = {}", body);
+		}
+
+		[Fact]
+		public void Command_Receiver_ValidatesDigestPerFire()
+		{
+			string src = ReadRuntime("EntitiesReplication.luau");
+			string body = ExtractBetween(src,
+				"function EntitiesReplication.RegisterCommandReceiver(contextName, receiver)",
+				"\nend");
+			Assert.Contains("ev.OnServerEvent:Connect(function(player, clientDigest, ops)", body);
+			Assert.Contains("expected = EntitiesReplication._digests[contextName]", body);
+			Assert.Contains("clientDigest ~= expected", body);
+			Assert.Contains("player:Kick(", body);
+		}
+
 		private static string ExtractBetween(string src, string startToken, string endToken)
 		{
 			int start = src.IndexOf(startToken, System.StringComparison.Ordinal);

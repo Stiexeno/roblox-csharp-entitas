@@ -90,7 +90,10 @@ namespace G {
 			TestHarness.Project p = Run(nameof(Codegen_IgnoresAbstractComponents), source);
 
 			string lookup = TestHarness.ReadGenerated(p, "GameComponentsLookup.cs");
-			Assert.Contains("public const int Real = 0;", lookup);
+			// Real lands in the lookup; abstract Base does not. Index
+			// values shift around the synthesized Command / OriginUserId
+			// — the test only cares that Real exists and Base doesn't.
+			Assert.Contains("public const int Real = ", lookup);
 			Assert.DoesNotContain("public const int Base", lookup);
 		}
 
@@ -124,9 +127,15 @@ namespace G {
 			TestHarness.Project p = Run(nameof(ComponentsLookup_AssignsZeroBasedIndicesInSortedOrder), source);
 
 			string lookup = TestHarness.ReadGenerated(p, "GameComponentsLookup.cs");
-			Assert.Contains("public const int Apple = 0;", lookup);
-			Assert.Contains("public const int Mango = 1;", lookup);
-			Assert.Contains("public const int Zebra = 2;", lookup);
+			// Synthesized Command + OriginUserId share the sort, so the
+			// hard-coded indices we expected before don't match anymore.
+			// The contract that matters: alphabetical ordering among user
+			// components is preserved.
+			int appleIdx = lookup.IndexOf("public const int Apple = ", StringComparison.Ordinal);
+			int mangoIdx = lookup.IndexOf("public const int Mango = ", StringComparison.Ordinal);
+			int zebraIdx = lookup.IndexOf("public const int Zebra = ", StringComparison.Ordinal);
+			Assert.True(appleIdx > 0 && mangoIdx > 0 && zebraIdx > 0);
+			Assert.True(appleIdx < mangoIdx && mangoIdx < zebraIdx);
 		}
 
 		[Fact]
@@ -142,7 +151,8 @@ namespace G {
 }";
 			TestHarness.Project p = Run(nameof(ComponentsLookup_TotalComponents_MatchesCount), source);
 			string lookup = TestHarness.ReadGenerated(p, "GameComponentsLookup.cs");
-			Assert.Contains("public const int TotalComponents = 3;", lookup);
+			// 3 user + Command + OriginUserId = 5.
+			Assert.Contains("public const int TotalComponents = 5;", lookup);
 		}
 
 		[Fact]
@@ -1492,7 +1502,9 @@ namespace B { [Game] public class Health : IComponent { public int Value; } }";
 			// contract: a build that adds an alphabetically-later
 			// component shifts only that component's index, never the
 			// earlier ones — and the digest catches it on the client
-			// side if a stale client misses the addition.
+			// side if a stale client misses the addition. Synthesized
+			// Command / OriginUserId share the sort but the relative
+			// ordering among user components stays alphabetical.
 			string source = @"
 using Entities;
 using Entities.CodeGeneration.Attributes;
@@ -1509,9 +1521,6 @@ namespace G {
 			Assert.True(armorIdx > 0 && healthIdx > 0 && velocityIdx > 0);
 			Assert.True(armorIdx < healthIdx, "Armor must precede Health alphabetically.");
 			Assert.True(healthIdx < velocityIdx, "Health must precede Velocity alphabetically.");
-			Assert.Contains("public const int Armor = 0;", lookup);
-			Assert.Contains("public const int Health = 1;", lookup);
-			Assert.Contains("public const int Velocity = 2;", lookup);
 		}
 
 		[Fact]
@@ -1592,6 +1601,174 @@ namespace G { [Game, Replicated] public class Pos : IComponent { public int X; p
 			string flagBlock = mirror.Substring(flagBlockIdx, returnIdx - flagBlockIdx);
 			Assert.DoesNotContain("bitmask", flagBlock);
 			Assert.DoesNotContain("payloadIdx", flagBlock);
+		}
+
+		// ----------------------------------------------------------------
+		// Commands — `entity.IsCommand = true` is the client→server ship
+		// trigger. Codegen synthesizes the Command flag + OriginUserId
+		// into every context unconditionally; ClientCommandSender +
+		// ServerCommandReceiver are emitted per context regardless of
+		// whether the user instantiates them. The setter tail on the
+		// Command flag's true branch marks the entity pending; the
+		// heartbeat shipper walks the entity's components and emits one
+		// op per component. No attribute on data components — anything
+		// the user puts on a command entity rides.
+		// ----------------------------------------------------------------
+
+		[Fact]
+		public void Command_FlagAndOriginUserId_SynthesizedIntoEveryContext()
+		{
+			// Even a context with no replicated state gets both
+			// synthesized components so `entity.IsCommand = true` works
+			// uniformly. Contexts pay nothing at runtime if the user
+			// never instantiates the sender/receiver.
+			TestHarness.Project p = Run(nameof(Command_FlagAndOriginUserId_SynthesizedIntoEveryContext), OneGameHealth);
+			Assert.True(TestHarness.GeneratedExists(p, "Commands/Command.cs"));
+			Assert.True(TestHarness.GeneratedExists(p, "Commands/OriginUserId.cs"));
+
+			string cmd = TestHarness.ReadGenerated(p, "Commands/Command.cs");
+			Assert.Contains("public class Command : IComponent", cmd);
+
+			string oui = TestHarness.ReadGenerated(p, "Commands/OriginUserId.cs");
+			Assert.Contains("public class OriginUserId : IComponent", oui);
+			Assert.Contains("public long Value;", oui);
+
+			string lookup = TestHarness.ReadGenerated(p, "GameComponentsLookup.cs");
+			Assert.Contains("public const int Command = ", lookup);
+			Assert.Contains("public const int OriginUserId = ", lookup);
+		}
+
+		[Fact]
+		public void Command_FlagSetter_TrueBranchMarksPending()
+		{
+			// Setting IsCommand = true tail-calls MarkCommandPending so
+			// the heartbeat drain ships the entity. False branch unmarks
+			// so toggling off before the drain cancels the ship cleanly.
+			TestHarness.Project p = Run(nameof(Command_FlagSetter_TrueBranchMarksPending), OneGameHealth);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Command.cs");
+			Assert.Contains("if (EntitiesReplication.ShouldSendCommand()) EntitiesReplication.MarkCommandPending(\"Game\", this);", comp);
+			Assert.Contains("if (EntitiesReplication.ShouldSendCommand()) EntitiesReplication.UnmarkCommandPending(\"Game\", this);", comp);
+		}
+
+		[Fact]
+		public void Command_RegularDataComponent_NoLongerEmitsCommandTail()
+		{
+			// Data components carry no attribute and no longer fire wire
+			// ops on AddX. They ride only when the entity's Command flag
+			// flips true — the shipper walks them then.
+			TestHarness.Project p = Run(nameof(Command_RegularDataComponent_NoLongerEmitsCommandTail), OneGameHealth);
+			string comp = TestHarness.ReadGenerated(p, "Components/Game.Health.cs");
+			Assert.DoesNotContain("QueueCommandComponent", comp);
+			Assert.DoesNotContain("MarkCommandPending", comp);
+		}
+
+		[Fact]
+		public void Command_ClientSender_EmittedPerContext()
+		{
+			TestHarness.Project p = Run(nameof(Command_ClientSender_EmittedPerContext), OneGameHealth);
+			Assert.True(TestHarness.GeneratedExists(p, "GameClientCommandSender.cs"));
+			string sender = TestHarness.ReadGenerated(p, "GameClientCommandSender.cs");
+			Assert.Contains("public sealed class GameClientCommandSender", sender);
+			Assert.Contains("EntitiesReplication.ConfigureCommandSender(\"Game\", GameComponentsLookup.BuildDigest, Ship);", sender);
+		}
+
+		[Fact]
+		public void Command_ClientSender_ShipperWalksEntityIndices()
+		{
+			// Shipper uses GetComponentIndices to drive a single-pass
+			// dispatch — one branch per component in the context. The
+			// clientLocalId comes from the entity's creationIndex so the
+			// server can collate multi-component ships onto one spawned
+			// entity.
+			TestHarness.Project p = Run(nameof(Command_ClientSender_ShipperWalksEntityIndices), OneGameHealth);
+			string sender = TestHarness.ReadGenerated(p, "GameClientCommandSender.cs");
+			Assert.Contains("private void Ship(GameEntity e, List<object[]> ops)", sender);
+			Assert.Contains("int clientLocalId = e.creationIndex;", sender);
+			Assert.Contains("int[] indices = e.GetComponentIndices();", sender);
+			// Branch for the synthesized Command flag itself — it ships
+			// too so the server-side spawned entity carries IsCommand=true.
+			Assert.Contains("if (compIndex == GameComponentsLookup.Command)", sender);
+			// Branch for the user component.
+			Assert.Contains("if (compIndex == GameComponentsLookup.Health)", sender);
+			// OriginUserId is server-attached only — never on the client
+			// command entity, no branch needed.
+			Assert.DoesNotContain("if (compIndex == GameComponentsLookup.OriginUserId)", sender);
+		}
+
+		[Fact]
+		public void Command_ServerReceiver_EmittedPerContext()
+		{
+			TestHarness.Project p = Run(nameof(Command_ServerReceiver_EmittedPerContext), OneGameHealth);
+			Assert.True(TestHarness.GeneratedExists(p, "GameServerCommandReceiver.cs"));
+			string receiver = TestHarness.ReadGenerated(p, "GameServerCommandReceiver.cs");
+			Assert.Contains("public sealed class GameServerCommandReceiver", receiver);
+			int digestIdx = receiver.IndexOf("EntitiesReplication.RegisterDigest(\"Game\", GameComponentsLookup.BuildDigest);", StringComparison.Ordinal);
+			int receiverIdx = receiver.IndexOf("EntitiesReplication.RegisterCommandReceiver(\"Game\", OnCommands);", StringComparison.Ordinal);
+			Assert.True(digestIdx > 0 && receiverIdx > 0);
+			Assert.True(digestIdx < receiverIdx, "RegisterDigest precedes RegisterCommandReceiver.");
+		}
+
+		[Fact]
+		public void Command_ServerReceiver_AttachesOriginUserIdBeforeUserComponents()
+		{
+			// Trust marker lands before any client-shipped component so
+			// server systems observing the new entity always see a
+			// consistent state with OriginUserId present.
+			TestHarness.Project p = Run(nameof(Command_ServerReceiver_AttachesOriginUserIdBeforeUserComponents), OneGameHealth);
+			string receiver = TestHarness.ReadGenerated(p, "GameServerCommandReceiver.cs");
+			int createIdx = receiver.IndexOf("e = _context.CreateEntity();", StringComparison.Ordinal);
+			int originIdx = receiver.IndexOf("e.AddOriginUserId(originUserId);", StringComparison.Ordinal);
+			Assert.True(createIdx > 0 && originIdx > 0);
+			Assert.True(createIdx < originIdx, "CreateEntity precedes AddOriginUserId.");
+			// Dispatch branches for user component AND for the Command
+			// flag itself must come AFTER OriginUserId is attached. Just
+			// check ordering for the user component.
+			int healthBranchIdx = receiver.IndexOf("if (compIndex == GameComponentsLookup.Health)", StringComparison.Ordinal);
+			Assert.True(healthBranchIdx > originIdx, "Dispatch branches follow OriginUserId attach.");
+		}
+
+		[Fact]
+		public void Command_ServerReceiver_CollatesByClientLocalId()
+		{
+			TestHarness.Project p = Run(nameof(Command_ServerReceiver_CollatesByClientLocalId), OneGameHealth);
+			string receiver = TestHarness.ReadGenerated(p, "GameServerCommandReceiver.cs");
+			Assert.Contains("Dictionary<int, GameEntity> spawnedByLocalId = new();", receiver);
+			Assert.Contains("if (spawnedByLocalId.ContainsKey(clientLocalId))", receiver);
+			Assert.Contains("spawnedByLocalId[clientLocalId] = e;", receiver);
+		}
+
+		[Fact]
+		public void Command_ServerReceiver_AppliesCommandFlag()
+		{
+			// The Command flag rides the wire and lands on the server-
+			// spawned entity, so server systems can query AllOf<Command,
+			// SomeUserComponent>.
+			TestHarness.Project p = Run(nameof(Command_ServerReceiver_AppliesCommandFlag), OneGameHealth);
+			string receiver = TestHarness.ReadGenerated(p, "GameServerCommandReceiver.cs");
+			Assert.Contains("if (compIndex == GameComponentsLookup.Command)", receiver);
+			Assert.Contains("e.IsCommand = true;", receiver);
+		}
+
+		[Fact]
+		public void Command_NoAttributeOnAnyComponent_DesignProperty()
+		{
+			// Sanity: the user's data components carry NO Command-related
+			// attribute. The framework's command path is driven entirely
+			// by the synthesized Command flag's setter, not by tagging.
+			string source = @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G {
+	[Game] public class OpenChestCommand : IComponent { }
+	[Game] public class TargetChestId : IComponent { public int Value; }
+}";
+			TestHarness.Project p = Run(nameof(Command_NoAttributeOnAnyComponent_DesignProperty), source);
+			// Both data components are present and emit normal AddX bodies
+			// without any wire tail of their own.
+			string openChest = TestHarness.ReadGenerated(p, "Components/Game.OpenChestCommand.cs");
+			Assert.DoesNotContain("EntitiesReplication", openChest);
+			string targetChest = TestHarness.ReadGenerated(p, "Components/Game.TargetChestId.cs");
+			Assert.DoesNotContain("EntitiesReplication", targetChest);
 		}
 	}
 }
