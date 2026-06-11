@@ -48,7 +48,12 @@ namespace RobloxCSharp.Extensions.Entities
 			// our component layout against its own and kick on mismatch
 			// — the only safe response when the two sides disagree on
 			// componentIndex ↔ type mapping.
-			sb.AppendLine($"\t\tEntitiesReplication.Subscribe(\"{ctx.Name}\", {ctx.Name}ComponentsLookup.BuildDigest, OnOps);");
+			// Pass the instance itself, not the OnOps method group — the
+			// transpiler lowers a method-group argument to a bare function
+			// (`self.OnOps`), so the runtime would call it without self.
+			// EntitiesReplication.Subscribe colon-dispatches
+			// `target:OnOps(ops)` instead.
+			sb.AppendLine($"\t\tEntitiesReplication.Subscribe(\"{ctx.Name}\", {ctx.Name}ComponentsLookup.BuildDigest, this);");
 			sb.AppendLine("\t}");
 			sb.AppendLine();
 

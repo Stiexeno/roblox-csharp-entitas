@@ -685,7 +685,7 @@ namespace G { [Game] public class Pos : IComponent { public int X; public int Y;
 			// RemoteEvent. No per-component += handler from the old shape.
 			TestHarness.Project p = Run(nameof(ClientReplication_SubscribesOnceInConstructor), OneReplicatedHealth);
 			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
-			Assert.Contains("EntitiesReplication.Subscribe(\"Game\", GameComponentsLookup.BuildDigest, OnOps);", mirror);
+			Assert.Contains("EntitiesReplication.Subscribe(\"Game\", GameComponentsLookup.BuildDigest, this);", mirror);
 			Assert.DoesNotContain("HealthAdded +=", mirror);
 			Assert.DoesNotContain("GameReplication.", mirror);
 		}
@@ -1548,7 +1548,7 @@ namespace G {
 		{
 			TestHarness.Project p = Run(nameof(ClientReplication_SubscribeForwardsDigest), OneReplicatedHealth);
 			string mirror = TestHarness.ReadGenerated(p, "GameClientReplication.cs");
-			Assert.Contains("EntitiesReplication.Subscribe(\"Game\", GameComponentsLookup.BuildDigest, OnOps);", mirror);
+			Assert.Contains("EntitiesReplication.Subscribe(\"Game\", GameComponentsLookup.BuildDigest, this);", mirror);
 		}
 
 		// ----------------------------------------------------------------

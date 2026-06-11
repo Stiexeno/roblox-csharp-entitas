@@ -97,7 +97,7 @@ namespace Entities.Tests
 			// Ready event with (contextName, digest). Server reads both.
 			string src = ReadRuntime("EntitiesReplication.luau");
 			string subscribeBody = ExtractBetween(src,
-				"function EntitiesReplication.Subscribe(contextName, buildDigest, handler)",
+				"function EntitiesReplication.Subscribe(contextName, buildDigest, target)",
 				"\nend");
 			Assert.Contains("readyEv:FireServer(contextName, buildDigest)", subscribeBody);
 		}

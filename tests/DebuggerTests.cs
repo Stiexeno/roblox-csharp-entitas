@@ -156,19 +156,19 @@ namespace Entities.Tests
 		[Fact]
 		public void Debugger_PublicApiPresent()
 		{
+			// Singleton design: the public surface is dot-static (what the
+			// C# stub binds to); instances live behind DebuggerSingleton and
+			// expose underscore-prefixed methods only.
 			string s = Read(RuntimeFile("Debugger.luau"));
 			foreach (string member in new[] {
-				"function Debugger.new()",
-				"function Debugger:AttachContext(context, componentsLookup)",
-				"function Debugger:RegisterSystemName(classTable, name)",
-				"function Debugger:AutoInitialize(features)",
-				"function Debugger:AddProfiledFeatures(features)",
-				"function Debugger:Show()",
-				"function Debugger:Hide()",
-				"function Debugger:Toggle()",
-				"function Debugger:IsServerView()",
-				"function Debugger:SwitchToServerView()",
-				"function Debugger:SwitchToClientView()",
+				"function Debugger.Run(contexts, authorize)",
+				"function Debugger.RegisterSystemName(classTable, name)",
+				"function Debugger.Show()",
+				"function Debugger.Hide()",
+				"function Debugger.Toggle()",
+				"function Debugger.IsServerView()",
+				"function Debugger.SwitchToServerView()",
+				"function Debugger.SwitchToClientView()",
 			})
 			{
 				Assert.Contains(member, s);
