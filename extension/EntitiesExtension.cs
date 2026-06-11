@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -22,7 +22,7 @@ namespace RobloxCSharp.Extensions.Entities
 	// into src/Generated/. The main pipeline then sees those files like
 	// any other source.
 	//
-	// This file is the orchestrator only — the discovery model, the
+	// This file is the orchestrator only â€” the discovery model, the
 	// per-template emitters, and the symbol/file helpers live in
 	// Discovery/ and Templates/ alongside it.
 	public sealed class EntitiesExtension : IRobloxCSharpExtension
@@ -63,7 +63,7 @@ namespace RobloxCSharp.Extensions.Entities
 
 			Dictionary<string, ContextModel> byContext = new(StringComparer.Ordinal);
 
-			// [PostConstructor] scan — walk every `partial class Contexts`
+			// [PostConstructor] scan â€” walk every `partial class Contexts`
 			// in user code, collect names of methods carrying the
 			// attribute. ContextsTemplate appends these as trailing calls
 			// in the generated Contexts() ctor so user-side index
@@ -115,6 +115,8 @@ namespace RobloxCSharp.Extensions.Entities
 				}
 			}
 
+			ComponentValidation.Run(byContext, diagnostics);
+
 			string genDir = Path.Combine(srcDir, GeneratedFolder);
 			string componentsDir = Path.Combine(genDir, "Components");
 			string watchedDir = Path.Combine(genDir, "Watched");
@@ -130,7 +132,7 @@ namespace RobloxCSharp.Extensions.Entities
 				Directory.CreateDirectory(genDir);
 				Directory.CreateDirectory(componentsDir);
 
-				// [Watched] synthesis — for every [Watched] component, append
+				// [Watched] synthesis â€” for every [Watched] component, append
 				// a {Name}Changed flag ComponentModel to the same context and
 				// emit a C# class file for it so user code can reference the
 				// type. The flag flows through the normal codegen pipeline
@@ -151,14 +153,14 @@ namespace RobloxCSharp.Extensions.Entities
 					}
 				}
 
-				// Command + OriginUserId synthesis — injected into every
+				// Command + OriginUserId synthesis â€” injected into every
 				// context unconditionally. The Command flag is the user-
-				// facing client→server ship trigger (`entity.IsCommand =
+				// facing clientâ†’server ship trigger (`entity.IsCommand =
 				// true`); OriginUserId is the server-attached trust marker
 				// carrying Player.UserId. Both class files live globally
 				// (no namespace) so every context's lookup shares one C#
 				// type; the files are emitted exactly once. Contexts that
-				// never use commands pay nothing at runtime — the wire is
+				// never use commands pay nothing at runtime â€” the wire is
 				// lazy and the per-frame drain is empty.
 				Directory.CreateDirectory(commandsDir);
 				const string originUserIdFileName = "OriginUserId.cs";
@@ -181,7 +183,7 @@ namespace RobloxCSharp.Extensions.Entities
 					// emits `public const int {TypeName}` which would
 					// collide on duplicates), so type-name alone gives a
 					// total order. The namespace secondary key is
-					// defensive — if the lookup template ever emits
+					// defensive â€” if the lookup template ever emits
 					// namespace-qualified consts, the order stays
 					// well-defined under name collisions without an extra
 					// migration. This sort is what BuildDigest hashes,
@@ -200,7 +202,7 @@ namespace RobloxCSharp.Extensions.Entities
 					expectedRootFiles.Add($"{ctx.Name}Entity.cs");
 					expectedRootFiles.Add($"{ctx.Name}Matcher.cs");
 
-					// Per-component partial — one file per component holds the
+					// Per-component partial â€” one file per component holds the
 					// entity property/methods + the matcher static getter +
 					// (for [Unique] / [EntityIndex]) the context-side state.
 					// The transpiler merges every `partial class GameEntity`
@@ -212,7 +214,7 @@ namespace RobloxCSharp.Extensions.Entities
 						expectedComponentFiles.Add(fileName);
 
 						// Separate hooks-interface file. Kept in its own .cs so
-						// the per-component partial file stays partial-only — a
+						// the per-component partial file stays partial-only â€” a
 						// partial-only file emits no Luau, while a file mixing
 						// partials + a real declaration would render the
 						// partials as null placeholders alongside the
@@ -232,14 +234,14 @@ namespace RobloxCSharp.Extensions.Entities
 						}
 					}
 
-					// Replication — codegen-emitted entity AddX/ReplaceX/RemoveX
+					// Replication â€” codegen-emitted entity AddX/ReplaceX/RemoveX
 					// bodies enqueue into the per-context buffer in
 					// EntitiesReplication (the call is in EntityTemplate). Two
 					// companion files per context:
-					//   {Ctx}ServerReplication — registers a snapshotter for
+					//   {Ctx}ServerReplication â€” registers a snapshotter for
 					//     late-join (walks every live entity + replicated
 					//     component, builds a Set-op batch).
-					//   {Ctx}ClientReplication — subscribes once and dispatches
+					//   {Ctx}ClientReplication â€” subscribes once and dispatches
 					//     received ops by componentIndex onto the local entity.
 					// When no component is replicated we just skip emit; the
 					// unified sweep below reaps any stranded pair.
@@ -252,7 +254,7 @@ namespace RobloxCSharp.Extensions.Entities
 						expectedRootFiles.Add($"{ctx.Name}ClientReplication.cs");
 					}
 
-					// Commands — emitted unconditionally per context. The
+					// Commands â€” emitted unconditionally per context. The
 					// client trigger is `entity.IsCommand = true`; the
 					// setter tail marks the entity in the per-context
 					// pending set, and the heartbeat drain ships the
@@ -262,23 +264,23 @@ namespace RobloxCSharp.Extensions.Entities
 					// from the Player.
 					//
 					// Pair per context:
-					//   {Ctx}ClientCommandSender — registers a shipper
+					//   {Ctx}ClientCommandSender â€” registers a shipper
 					//     fn with EntitiesReplication. The shipper walks
 					//     entity.GetComponentIndices() and dispatches
 					//     per index.
-					//   {Ctx}ServerCommandReceiver — registers a
+					//   {Ctx}ServerCommandReceiver â€” registers a
 					//     receiver fn that decodes ops by index and
 					//     applies them onto a fresh entity.
 					//
 					// Contexts that never use commands instantiate
-					// neither and pay nothing at runtime — RemoteEvents
+					// neither and pay nothing at runtime â€” RemoteEvents
 					// stay uncreated, pending sets stay empty.
 					SymbolHelpers.WriteFile(genDir, $"{ctx.Name}ClientCommandSender.cs", ClientCommandSenderTemplate.Emit(ctx));
 					SymbolHelpers.WriteFile(genDir, $"{ctx.Name}ServerCommandReceiver.cs", ServerCommandReceiverTemplate.Emit(ctx));
 					expectedRootFiles.Add($"{ctx.Name}ClientCommandSender.cs");
 					expectedRootFiles.Add($"{ctx.Name}ServerCommandReceiver.cs");
 
-					// [Watched] cleanup — emit per context when any component
+					// [Watched] cleanup â€” emit per context when any component
 					// in the context is [Watched]. The user adds it to the
 					// tail of their feature pipeline; it clears every Changed
 					// flag at end of frame so reactive systems see one-frame
@@ -298,15 +300,15 @@ namespace RobloxCSharp.Extensions.Entities
 				expectedRootFiles.Add("Contexts.cs");
 			}
 
-			// Unified sweep — reap any *.cs in Generated/, Generated/Components/,
+			// Unified sweep â€” reap any *.cs in Generated/, Generated/Components/,
 			// or Generated/Watched/ that this scan didn't (re)produce. Runs
 			// even when byContext.Count == 0 so removing the last
-			// [Context]-tagged component — or commenting one out — wipes the
+			// [Context]-tagged component â€” or commenting one out â€” wipes the
 			// tree cleanly. Also handles a whole context disappearing (orphans
 			// {Ctx}Context.cs / {Ctx}Entity.cs / {Ctx}Matcher.cs / etc.) and
 			// subsumes the prior-slice migration deletes for the renamed
 			// Replication.cs / ClientMirror.cs / ClientMirror.client.cs
-			// shapes — none of those names ever land in expectedRootFiles.
+			// shapes â€” none of those names ever land in expectedRootFiles.
 			if (Directory.Exists(componentsDir))
 			{
 				foreach (string existing in Directory.EnumerateFiles(componentsDir, "*.cs"))

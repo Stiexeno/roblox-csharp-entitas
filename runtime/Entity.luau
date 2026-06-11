@@ -150,11 +150,26 @@ function Entity:HasAnyComponent(indices)
 end
 
 function Entity:RemoveAllComponents()
-	-- Push every live component to the pool, then clear.
-	for index, component in pairs(self._components) do
-		self:_PushToPool(index, component)
+	-- Entitas parity (Entity.InternalDestroy → RemoveAllComponents fires
+	-- HandleComponent(i, nil) per component): every removal must flow
+	-- through the same notification path as RemoveComponent, so cached
+	-- groups drop the entity NOW. Without this a destroyed entity stays
+	-- in its groups until some unrelated mutation re-checks it — and
+	-- because destroyed husks are pooled and reused, the recycled entity
+	-- would still be a member of its previous life's groups.
+	local indices = {}
+	for index in pairs(self._components) do
+		table.insert(indices, index)
 	end
-	self._components = {}
+	table.sort(indices) -- deterministic removal order, like Entitas' ascending scan
+
+	for i = 1, #indices do
+		local index = indices[i]
+		local component = self._components[index]
+		self._components[index] = nil
+		self:_PushToPool(index, component)
+		self:_NotifyContext(index, nil)
+	end
 end
 
 -- Pool-aware allocator. The codegen-emitted AddX/ReplaceX call this with
@@ -172,8 +187,19 @@ function Entity:CreateComponent(T, index)
 end
 
 function Entity:Destroy()
-	self:RemoveAllComponents()
+	-- Entitas parity: destroying twice is a bug in caller code (a stale
+	-- reference to a pooled husk) — fail loud instead of silently
+	-- re-pooling.
+	if not self._isEnabled then
+		error("Cannot destroy an already-destroyed entity.")
+	end
+
+	-- Entitas order (InternalDestroy): disable first, then strip
+	-- components through the notifying path, so anything observing the
+	-- removal notifications sees an entity that is already dead.
 	self._isEnabled = false
+	self:RemoveAllComponents()
+
 	-- Hand the husk back to the context for reuse. The context
 	-- removes us from its active set and pushes us onto its
 	-- _reusableEntities stack; the next CreateEntity pops + Reactivates.
