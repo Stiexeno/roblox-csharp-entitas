@@ -16,8 +16,9 @@ Each entry below has a probe test pinning the behavior in `tests/TranspilerProbe
 
 - **`async` / `await`** — `AwaitExpressionTransformer` unwraps `await foo()` to `foo()`. The `async` keyword on the method signature is a no-op on lowering. True coroutine wrapping (per the renderer's TODO list) isn't done yet, so `await` is structural compatibility — the call runs synchronously in Luau. If you need real concurrency, use Roblox's `task.spawn(fn)` / `task.delay(seconds, fn)` / `task.wait(seconds)`.
 - **`out` parameters in method declarations** — `int Calculate(ref int a, out int b, in int c, params int[] values)` compiles fine. Confirmed in `RobloxCSharp.Tests/.../Kitchen.cs`.
-- **Pattern matching with `is X y`** — `IsPatternExpressionTransformer` handles `DeclarationPatternSyntax` and binds the variable via `AddPrerequisite(LocalDeclaration(...))`. So `if (obj is int i) { use(i); }` works.
-- **Tuple deconstruction in declarations** — `(int a, int b) = method();` works; both locals are bound.
+- **Pattern matching — full surface** — constant, relational (`> 5`), `and`/`or`/`not`, property (`{ Age: > 2 }`), type, declaration (`is Foo f`), `var` and discard patterns all lower — in `is` expressions, `switch` expressions, AND `switch` statement case labels, including `when` clauses. Type tests emit `CS.instanceof`. (List patterns and positional/tuple patterns don't lower.)
+- **Tuple deconstruction** — `var (a, b) = method();`, swaps `(a, b) = (b, a)` (simultaneous), and `foreach (var (key, value) in dict)` all lower. Multi-targets emit Lua multi-assignment.
+- **Default parameter values, named arguments, local functions, indexers, `yield` iterators (eager), `Nullable<T>` members** — all lower since converter `0.1.0-alpha.52`; don't contort around them.
 
 ### ❌ Doesn't lower
 
