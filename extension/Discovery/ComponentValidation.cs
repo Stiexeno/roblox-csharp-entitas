@@ -38,6 +38,17 @@ namespace RobloxCSharp.Extensions.Entities
 							+ "only public instance fields generate accessors. Use fields.",
 							Location(component.Symbol));
 					}
+
+					// Every context gets a synthesized Command flag and
+					// OriginUserId component; a user component with either
+					// name would collide in the generated lookup.
+					if (component.TypeName is "Command" or "OriginUserId")
+					{
+						diagnostics.Error("ENT0004",
+							$"component name '{component.TypeName}' is reserved — codegen synthesizes a "
+							+ $"'{component.TypeName}' component into every context. Rename the component.",
+							Location(component.Symbol));
+					}
 				}
 			}
 		}

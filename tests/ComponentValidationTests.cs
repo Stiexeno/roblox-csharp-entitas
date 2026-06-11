@@ -1,4 +1,4 @@
-using RobloxCSharp.Common.Diagnostics;
+﻿using RobloxCSharp.Common.Diagnostics;
 
 namespace Entities.Tests
 {
@@ -71,6 +71,44 @@ namespace G
 
 			Assert.Contains(p.Diagnostics.Items, d => d.Code == "ENT0002" && d.Message.Contains("Health"));
 			Assert.False(p.Diagnostics.HasErrors);
+		}
+
+		[Fact]
+		public void AbstractComponent_WithContextAttribute_ReportsWarning()
+		{
+			TestHarness.Project p = Run(nameof(AbstractComponent_WithContextAttribute_ReportsWarning), @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G
+{
+	[Game]
+	public abstract class BaseStat : IComponent
+	{
+		public int Value;
+	}
+}");
+
+			Assert.Contains(p.Diagnostics.Items, d => d.Code == "ENT0003" && d.Message.Contains("BaseStat"));
+			Assert.False(p.Diagnostics.HasErrors);
+		}
+
+		[Fact]
+		public void Component_NamedCommand_ReportsReservedNameError()
+		{
+			TestHarness.Project p = Run(nameof(Component_NamedCommand_ReportsReservedNameError), @"
+using Entities;
+using Entities.CodeGeneration.Attributes;
+namespace G
+{
+	[Game]
+	public class Command : IComponent
+	{
+		public int Value;
+	}
+}");
+
+			Assert.True(p.Diagnostics.HasErrors);
+			Assert.Contains(p.Diagnostics.Items, d => d.Code == "ENT0004");
 		}
 
 		[Fact]

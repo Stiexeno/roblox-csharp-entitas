@@ -98,7 +98,18 @@ function Matcher.AllOfIndices(_T, indices)
 	return m
 end
 
-function Matcher.AnyOf(_T, matchers)
+-- AnyOf is BOTH a static factory (`Matcher.AnyOf(_T, matchers)` per the
+-- erased-generic convention) and an instance chain step
+-- (`m:AnyOf(matchers)`). Lua gives them one table slot, so dispatch on
+-- the first argument: a Matcher instance means the chain form,
+-- anything else (the erased type arg) means the factory.
+function Matcher.AnyOf(selfOrT, matchers)
+	if getmetatable(selfOrT) == Matcher then
+		selfOrT._anyOfIndices = distinctSorted(mergeIndicesFromMatchers(matchers))
+		selfOrT._indices = nil
+		return selfOrT
+	end
+
 	local m = Matcher.new()
 	m._anyOfIndices = distinctSorted(mergeIndicesFromMatchers(matchers))
 	return m
@@ -107,11 +118,6 @@ end
 -- Instance-chain methods. The C# stub has overloads taking either
 -- `int[]` or `IMatcher<T>[]`. Lua collapses overloads — the matchers
 -- form is what frozen-feast uses, so that's what we implement.
-function Matcher:AnyOf(matchers)
-	self._anyOfIndices = distinctSorted(mergeIndicesFromMatchers(matchers))
-	self._indices = nil
-	return self
-end
 
 function Matcher:NoneOf(matchers)
 	self._noneOfIndices = distinctSorted(mergeIndicesFromMatchers(matchers))

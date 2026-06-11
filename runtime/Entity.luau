@@ -94,6 +94,14 @@ function Entity:ReplaceComponent(index, component)
 end
 
 function Entity:GetComponent(index)
+	-- Reading a destroyed husk is always a stale-reference bug in caller
+	-- code; say so instead of the misleading "does not have component".
+	-- (Once the husk is reused the reference aliases the new entity —
+	-- that case is undetectable without handle indirection; hold entity
+	-- references only within a frame.)
+	if not self._isEnabled then
+		error("Cannot read component from a destroyed entity (stale reference).")
+	end
 	local c = self._components[index]
 	if c == nil then
 		error("Entity does not have component at index " .. tostring(index) .. ".")
@@ -108,6 +116,9 @@ end
 -- a clean instance normally. Caller pays one table.clone per Get, but
 -- only for replicated components routed through here by codegen.
 function Entity:GetReplicatedComponent(index)
+	if not self._isEnabled then
+		error("Cannot read component from a destroyed entity (stale reference).")
+	end
 	local c = self._components[index]
 	if c == nil then
 		error("Entity does not have component at index " .. tostring(index) .. ".")

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+        with:
+          path: roblox-csharp-entities
+
+      # The extension and tests compile against the converter's source
+      # (IRobloxCSharpExtension, DiagnosticBag, transpile pipeline). The
+      # csproj probes ../roblox-csharp relative to the plugin checkout.
+      - name: Checkout roblox-csharp converter
+        uses: actions/checkout@v4
+        with:
+          repository: Stiexeno/roblox-csharp
+          path: roblox-csharp
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Build extension (catches converter API drift)
+        run: dotnet build roblox-csharp-entities/extension/extension.csproj -c Release
+
+      - name: Run codegen + transpile tests
+        run: dotnet test roblox-csharp-entities/tests/Entities.Tests.csproj -c Release
+
+      - name: Install Lune
+        run: |
+          LUNE_VERSION=0.10.4
+          curl -fsSL -o lune.zip "https://github.com/lune-org/lune/releases/download/v${LUNE_VERSION}/lune-${LUNE_VERSION}-linux-x86_64.zip"
+          unzip -o lune.zip -d "$HOME/.lune"
+          chmod +x "$HOME/.lune/lune"
+          echo "$HOME/.lune" >> "$GITHUB_PATH"
+
+      - name: Run runtime specs (Lune)
+        working-directory: roblox-csharp-entities
+        run: lune run tests/runtime/run

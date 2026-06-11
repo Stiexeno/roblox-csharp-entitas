@@ -96,12 +96,23 @@ namespace RobloxCSharp.Extensions.Entities
 						}
 					}
 
-					if (typeSymbol.IsAbstract) continue;
 					if (!SymbolHelpers.ImplementsInterface(typeSymbol, attrs.Component)) continue;
 
 					foreach (AttributeData attr in typeSymbol.GetAttributes())
 					{
 						if (!SymbolHelpers.InheritsFrom(attr.AttributeClass, attrs.Context)) continue;
+
+						// Abstract components are skipped on purpose (no
+						// entity can carry them) — but a [Context]-tagged
+						// abstract class means the user expected codegen,
+						// so say so instead of generating nothing silently.
+						if (typeSymbol.IsAbstract)
+						{
+							diagnostics.Warning("ENT0003",
+								$"abstract component '{typeSymbol.Name}' is skipped by codegen — "
+								+ "only concrete IComponent classes generate accessors.");
+							break;
+						}
 						string contextName = SymbolHelpers.ExtractContextName(attr);
 						if (string.IsNullOrEmpty(contextName)) continue;
 
