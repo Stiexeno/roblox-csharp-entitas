@@ -408,7 +408,12 @@ end
 -- event with (contextName, digest) so the server can validate the
 -- handshake and dispatch a late-join snapshot back; subsequent Subscribes
 -- on the same context don't re-ping.
-function EntitiesReplication.Subscribe(contextName, buildDigest, handler)
+-- target is the codegen-emitted {Ctx}ClientReplication instance. We call
+-- target:OnOps(ops) (colon dispatch) here in Luau because the transpiler
+-- doesn't lower C# method calls inside lambda bodies to colon-dispatched
+-- Lua methods — passing the target up and calling the method here is the
+-- workaround.
+function EntitiesReplication.Subscribe(contextName, buildDigest, target)
 	if EntitiesReplication._isServer then return end
 	local ev = getOrCreateEvent(contextName)
 	ev.OnClientEvent:Connect(function(tick, ops)
@@ -416,7 +421,7 @@ function EntitiesReplication.Subscribe(contextName, buildDigest, handler)
 		if tick ~= nil and tick > prev then
 			EntitiesReplication._serverTicks[contextName] = tick
 		end
-		handler(ops)
+		target:OnOps(ops)
 	end)
 	if EntitiesReplication._readyFiredFor[contextName] == nil then
 		EntitiesReplication._readyFiredFor[contextName] = true

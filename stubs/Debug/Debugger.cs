@@ -1,57 +1,62 @@
-#pragma warning disable CS0626 // Methods are implemented in runtime/Debug/Debugger.luau
+#pragma warning disable CS0626 // Methods are implemented in runtime/Debugger.luau
 
 namespace Entities.Debug
 {
 	// IDE type-checking surface for the runtime ScreenGui debugger.
-	// runtime/Debug/Debugger.luau is the real impl; this file exists so
-	// consumer C# can write `using Entities.Debug; new Debugger();`.
+	// runtime/Debugger.luau is the real impl; this file exists so consumer
+	// C# can write `using Entities.Debug; Debugger.Run(contexts);`.
 	//
-	// Plasma is required internally by Debugger.luau, so the ctor is
-	// no-arg. Wire up like this:
+	// Wire it on boot, BEFORE constructing any Feature:
 	//
 	//   // Bootstrap.client.cs
-	//   Debugger debugger = new Debugger();
-	//   debugger.AttachContext(Contexts.sharedInstance.game, GameComponentsLookup.componentNames);
-	//   debugger.AutoInitialize(RunService.Heartbeat, new Feature[] { _gameFeature });
-	//   debugger.Show();
+	//   var contexts = new Contexts();
+	//   Contexts.sharedInstance = contexts;
 	//
-	// F4 toggles. AttachContext is required per context for entity/
-	// component visibility; AutoInitialize wires the plasma frame loop
-	// and the F4 binding; Show enables drawing.
-	public class Debugger
+	//   Debugger.Run(contexts, IsAdmin);   // gate on UserId (see overload)
+	//
+	//   new GameFeature(contexts);         // auto-attaches profiler
+	//
+	// F4 toggles. Contexts are walked off `contexts.allContexts`; per-context
+	// `componentNames` is read off the context itself (codegen-emitted). Every
+	// Feature constructed after Debugger.Run self-registers its profiler via
+	// the Debugger singleton — no feature array to maintain, no "did I forget
+	// to call AddProfiledFeatures for the level-load feature" bug.
+	public static class Debugger
 	{
-		public extern Debugger();
+		// Studio: install unconditionally.
+		// Live (no authorize): client install is BLOCKED — non-admin players
+		// pressing F4 see nothing, and Feature.new sees Current == nil so
+		// profiler overhead doesn't fire. Server install proceeds but the
+		// "start" remote gate rejects every player.
+		// Call this overload only when you want the debugger off in live.
+		public static extern void Run(IContexts contexts);
 
-		// componentsLookup is the codegen-emitted GameComponentsLookup.componentNames
-		// (a string[] indexed by componentIndex). Required so the UI can label
-		// component rows by name.
-		public extern void AttachContext(IContext context, string[] componentsLookup);
+		// Studio: install unconditionally (authorize is ignored).
+		// Live client: `authorize(Players.LocalPlayer.UserId)` is called once
+		// at this call. If false, Run is a no-op — no GUI, no F4 binding, no
+		// profiler overhead. If true, install proceeds.
+		// Live server: authorize is stored; the "start" remote consults it
+		// with the requesting player's UserId to gate SwitchToServerView.
+		// UserId is `long` because Roblox UserIds exceed int32 range. If you
+		// need the full Player object inside your check, resolve it via
+		// Players.GetPlayerByUserId(id) — keeps this stub from needing the
+		// RobloxApi reference.
+		public static extern void Run(IContexts contexts, System.Func<long, bool> authorize);
 
 		// Override a system's display name. Useful when debug.info-based
 		// resolution returns an ambiguous source path (e.g., generic systems
 		// generated from a shared module). Pass the class table, not an
 		// instance.
-		public extern void RegisterSystemName(object classTable, string name);
+		public static extern void RegisterSystemName(object classTable, string name);
 
-		// One-time setup: ScreenGui, F4 binding, Heartbeat-driven plasma
-		// frames, and a profiler hooked onto each feature so per-system
-		// timing flows without the user passing a signal. The user
-		// separately drives Feature.Execute on whichever signal they
-		// want; profiler captures wherever Execute is called.
-		public extern void AutoInitialize(Feature[] features);
+		// Show / Hide / Toggle — client-only. F4 calls Toggle. No-ops if the
+		// authorize gate rejected this player.
+		public static extern void Show();
+		public static extern void Hide();
+		public static extern void Toggle();
 
-		// Attach a profiler to features added after AutoInitialize —
-		// useful when features are constructed lazily (e.g., entering a
-		// level loads gameplay features that weren't around at startup).
-		public extern void AddProfiledFeatures(Feature[] features);
-
-		// Show / Hide / Toggle — client-only. F4 calls Toggle.
-		public extern void Show();
-		public extern void Hide();
-		public extern void Toggle();
-
-		public extern bool IsServerView();
-		public extern void SwitchToServerView();
-		public extern void SwitchToClientView();
+		public static extern bool IsServerView();
+		public static extern void SwitchToServerView();
+		public static extern void SwitchToClientView();
 	}
 }

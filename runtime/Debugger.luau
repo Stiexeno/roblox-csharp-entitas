@@ -1,13 +1,14 @@
 -- Public surface for the runtime ScreenGui debugger.
 --
 -- Usage (transpiled from C#):
---   local debugger = Debugger.new(Plasma)
---   debugger:AttachContext(Contexts.sharedInstance.game, GameComponentsLookup.componentNames)
---   debugger:AutoInitialize({
---       { signal = RunService.Heartbeat,     features = { gameFeature } },
---       { signal = RunService.RenderStepped, features = { viewFeature } },
---   })
---   if isClient then debugger:Show() end
+--   Debugger.Run(Contexts.sharedInstance)   -- BEFORE constructing features
+--   -- features built after this point self-register via DebuggerSingleton
+--   if isClient then Debugger.Show() end
+--
+-- Public API is the dot-static surface at the bottom (Run / Show / Hide /
+-- Toggle / IsServerView / SwitchToServerView / SwitchToClientView /
+-- RegisterSystemName) — what the C# stub at stubs/Debug/Debugger.cs binds
+-- to. Instance methods are underscore-prefixed and dispatched to from those.
 --
 -- Adapted from matter-ecs/matter lib/debugger/debugger.luau. Concepts
 -- mapped: Matter.World → Context, Matter.Loop._worlds → contexts array,
@@ -31,6 +32,7 @@ local DebuggerEventBridge = require(script.Parent.DebuggerEventBridge)
 local ClientBindings = require(script.Parent.ClientBindings)
 local MouseHighlight = require(script.Parent.MouseHighlight)
 local DebuggerHookContext = require(script.Parent.DebuggerHookContext)
+local DebuggerSingleton = require(script.Parent.DebuggerSingleton)
 
 local IS_SERVER = RunService:IsServer()
 local IS_CLIENT = RunService:IsClient()
@@ -40,15 +42,30 @@ local TOGGLE_KEY = Enum.KeyCode.F4
 local Debugger = {}
 Debugger.__index = Debugger
 
-function Debugger.new()
+-- Internal ctor — `Debugger.Run` is the only public entry point.
+local function _new(authorize)
 	local wire = DebuggerWire.GetOrCreateRemoteEvent()
+	local profiler = DebuggerProfiler.new()
 
 	local self = setmetatable({
 		plasma = Plasma,
 		enabled = false,
+		-- Live-gate predicate. nil → server "start" rejects everyone (existing
+		-- safe default). Studio bypasses this entirely. Client-side install
+		-- has already been gated upstream in Debugger.Run, so this field is
+		-- only consulted on the server when "start" arrives.
+		_authorize = authorize,
 
 		contexts = {},          -- array of { context, lookup, listener }
-		featureGroups = {},     -- array of { signal, features, profiler, connection }
+		-- Single shared profiler across every Feature. featureGroups keeps
+		-- the Sidebar/ErrorInspect widget shape stable (they walk
+		-- featureGroups[i].features / .profiler) — there's just one entry now.
+		_features = {},
+		_profiler = profiler,
+		_profilerBound = profiler:Bind(),
+		featureGroups = {
+			{ features = {}, profiler = profiler },
+		},
 
 		snapshot = DebuggerSnapshot.new(),
 
@@ -56,7 +73,7 @@ function Debugger.new()
 		debugEntity = nil,      -- currently inspected entity:creationIndex()
 		debugSystem = nil,      -- currently inspected system instance
 		hoverEntity = nil,      -- mouse-highlight target
-		skipSystemsAcrossFeatures = {},  -- (system) → bool, lifted from union of profiler skip sets
+		skipSystemsAcrossFeatures = {},  -- (system) → bool, lifted from profiler skip set
 
 		_seenEvents = {},
 		_eventBridge = DebuggerEventBridge.new(function(...) wire:FireClient(...) end),
@@ -67,6 +84,10 @@ function Debugger.new()
 		_currentDebugSystemStack = {},  -- HookContext writes here for query attribution
 	}, Debugger)
 
+	-- featureGroups[1].features aliases _features so widget code sees every
+	-- Feature that self-registers later.
+	self.featureGroups[1].features = self._features
+
 	if IS_SERVER then
 		self:_connectRemoteEvent()
 	elseif IS_CLIENT then
@@ -76,24 +97,7 @@ function Debugger.new()
 	return self
 end
 
--- componentsLookup is the codegen-emitted {Ctx}ComponentsLookup.componentNames
--- array (indexed by componentIndex). Required so the UI can label rows.
-function Debugger:AttachContext(context, componentsLookup)
-	table.insert(self.contexts, { context = context, lookup = componentsLookup })
-end
-
-function Debugger:RegisterSystemName(classTable, name)
-	SystemNameCache.RegisterSystemName(classTable, name)
-end
-
--- One-time setup: ScreenGui, F4 binding, Heartbeat-driven plasma frames,
--- and a profiler attached to each feature so per-system timing flows in
--- without the user passing a signal. The user separately drives
--- Feature.Execute on whichever signal they want; the profiler captures
--- timings transparently wherever Execute is called.
-function Debugger:AutoInitialize(features)
-	assert(type(features) == "table", "AutoInitialize: features must be an array")
-
+function Debugger:_installGui()
 	local parent = Instance.new("ScreenGui")
 	parent.Name = "EntitiesDebugger"
 	parent.DisplayOrder = 2^31 - 1
@@ -111,8 +115,6 @@ function Debugger:AutoInitialize(features)
 	self.plasmaNode = self.plasma.new(parent)
 	self.guiParent = parent
 
-	self:AddProfiledFeatures(features)
-
 	-- Plasma frame driver. Always Heartbeat; if you need RenderStepped
 	-- specifically, you can fork — but Heartbeat after physics is what
 	-- typical Roblox UIs use and matches the rest of this plugin.
@@ -126,24 +128,18 @@ function Debugger:AutoInitialize(features)
 
 		self._toggleConnection = UserInputService.InputBegan:Connect(function(input, processed)
 			if processed then return end
-			if input.KeyCode == TOGGLE_KEY then self:Toggle() end
+			if input.KeyCode == TOGGLE_KEY then self:_toggle() end
 		end)
 	end
 end
 
--- Attach a profiler to additional features after AutoInitialize. Useful
--- when features are constructed lazily (e.g., entering a level loads
--- gameplay features that weren't around at startup).
-function Debugger:AddProfiledFeatures(features)
-	local profiler = DebuggerProfiler.new()
-	local bound = profiler:Bind()
-	for i = 1, #features do
-		features[i]:SetProfiler(bound)
-	end
-	table.insert(self.featureGroups, {
-		features = features,
-		profiler = profiler,
-	})
+-- Called by Feature.new at construction time when Debugger.Current is set.
+-- Wires the shared profiler into the Feature's Systems dispatch and tracks
+-- it for the UI sidebar. Lazy-built features hit this path the same way as
+-- bootstrap-time features — no AutoInitialize / AddProfiledFeatures dance.
+function Debugger:_attachFeatureProfiler(feature)
+	feature:SetProfiler(self._profilerBound)
+	table.insert(self._features, feature)
 end
 
 function Debugger:_tick(deltaTime)
@@ -211,28 +207,28 @@ function Debugger:_disable()
 	-- gets called again, the same listeners resume capturing.
 end
 
-function Debugger:Show()
-	assert(IS_CLIENT, "Debugger:Show may only be called on the client")
+function Debugger:_show()
+	assert(IS_CLIENT, "Debugger.Show may only be called on the client")
 	self:_enable()
 	if self.guiParent then self.guiParent.Enabled = true end
 end
 
-function Debugger:Hide()
-	assert(IS_CLIENT, "Debugger:Hide may only be called on the client")
+function Debugger:_hide()
+	assert(IS_CLIENT, "Debugger.Hide may only be called on the client")
 	self:_disable()
 	if self.guiParent then self.guiParent.Enabled = false end
-	if self:IsServerView() then self:SwitchToClientView() end
+	if self:_isServerView() then self:_switchToClientView() end
 end
 
-function Debugger:Toggle()
-	if self.enabled then self:Hide() else self:Show() end
+function Debugger:_toggle()
+	if self.enabled then self:_hide() else self:_show() end
 end
 
-function Debugger:IsServerView()
+function Debugger:_isServerView()
 	return self._serverGuiEnabled == true
 end
 
-function Debugger:SwitchToServerView()
+function Debugger:_switchToServerView()
 	assert(IS_CLIENT, "SwitchToServerView is client-only")
 	self.debugSystem = nil
 	if self._serverGui == nil then
@@ -247,7 +243,7 @@ function Debugger:SwitchToServerView()
 	self._serverGuiEnabled = true
 end
 
-function Debugger:SwitchToClientView()
+function Debugger:_switchToClientView()
 	assert(IS_CLIENT, "SwitchToClientView is client-only")
 	self._wire:FireServer("stop")
 	if self._serverGui ~= nil then self._serverGui.Enabled = false end
@@ -259,9 +255,11 @@ function Debugger:_connectRemoteEvent()
 		if action == "event" then
 			self._eventBridge:fireEventFromPlayer(player, ...)
 		elseif action == "start" then
-			-- Production gate: outside Studio, require an authorize hook.
+			-- Production gate: outside Studio, require an authorize predicate
+			-- and check it against the requesting player's UserId. Without
+			-- one, every player is rejected (the safe default).
 			if not RunService:IsStudio() then
-				if self.authorize == nil or not self.authorize(player) then
+				if self._authorize == nil or not self._authorize(player.UserId) then
 					return
 				end
 			end
@@ -288,6 +286,92 @@ function Debugger:_disconnectPlayer(player)
 	if next(self._playersUsingDebugger) == nil then
 		self:_disable()
 	end
+end
+
+-- ============================================================================
+-- Dot-static public surface — what C# `public static extern` binds to.
+-- ============================================================================
+
+-- Entry point. Idempotent — second call returns the existing singleton.
+-- Walks contexts.allContexts and reads `componentNames` off each context
+-- (codegen-emitted on {Ctx}Context partial). After this returns,
+-- DebuggerSingleton.Current is set, so every Feature constructed afterwards
+-- self-attaches its profiler.
+--
+-- authorize (optional): (userId: number) -> bool. Gates install in live.
+--   Studio:                    ignored — install always proceeds.
+--   Client live, nil:          NO-OP. Current stays nil → Features don't
+--                              attach a profiler, F4 binding never installs.
+--   Client live, returns true: install proceeds for this player.
+--   Client live, returns false: NO-OP. Same as nil.
+--   Server live:               install always proceeds (the wire needs to
+--                              listen); the predicate is stored and applied
+--                              to the "start" remote per requesting player.
+function Debugger.Run(contexts, authorize)
+	if DebuggerSingleton.Current ~= nil then return DebuggerSingleton.Current end
+
+	assert(contexts ~= nil, "Debugger.Run: contexts must not be nil — pass Contexts.sharedInstance")
+
+	-- Client gate. Server unconditionally installs the wire listener — the
+	-- per-player gate runs there at "start" time instead.
+	if IS_CLIENT and not RunService:IsStudio() then
+		if authorize == nil then return nil end
+		local localPlayer = Players.LocalPlayer
+		if localPlayer == nil or not authorize(localPlayer.UserId) then
+			return nil
+		end
+	end
+
+	local self = _new(authorize)
+	DebuggerSingleton.Current = self
+
+	local all = contexts:allContexts()
+	assert(type(all) == "table", "Debugger.Run: contexts.allContexts() must return an array")
+	for i = 1, #all do
+		local ctx = all[i]
+		local names = ctx.componentNames
+		if type(names) == "function" then names = ctx:componentNames() end
+		table.insert(self.contexts, { context = ctx, lookup = names })
+	end
+
+	self:_installGui()
+	return self
+end
+
+function Debugger.RegisterSystemName(classTable, name)
+	SystemNameCache.RegisterSystemName(classTable, name)
+end
+
+function Debugger.Show()
+	local c = DebuggerSingleton.Current
+	assert(c ~= nil, "Debugger.Show called before Debugger.Run")
+	c:_show()
+end
+
+function Debugger.Hide()
+	local c = DebuggerSingleton.Current
+	if c ~= nil then c:_hide() end
+end
+
+function Debugger.Toggle()
+	local c = DebuggerSingleton.Current
+	if c ~= nil then c:_toggle() end
+end
+
+function Debugger.IsServerView()
+	local c = DebuggerSingleton.Current
+	return c ~= nil and c:_isServerView()
+end
+
+function Debugger.SwitchToServerView()
+	local c = DebuggerSingleton.Current
+	assert(c ~= nil, "Debugger.SwitchToServerView called before Debugger.Run")
+	c:_switchToServerView()
+end
+
+function Debugger.SwitchToClientView()
+	local c = DebuggerSingleton.Current
+	if c ~= nil then c:_switchToClientView() end
 end
 
 return Debugger
